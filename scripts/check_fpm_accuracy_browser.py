@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import gzip
+import hashlib
 import http.server
 import json
 import os
@@ -15,6 +17,7 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 from fpm_accuracy.contract import artifact_key
 from playwright.async_api import async_playwright, expect
@@ -25,6 +28,34 @@ ROOT = Path(__file__).resolve().parents[1]
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+
+def prepare_visualization_fixtures(directory: Path):
+    """Materialize readable fixtures as production-style hashed assets."""
+    catalog = json.loads((directory / "catalog.json").read_text())
+    files = {}
+
+    def asset(name, compressed=False):
+        source = directory / name
+        content = json.dumps(json.loads(source.read_text()), separators=(",", ":"), sort_keys=True).encode()
+        if compressed:
+            content = gzip.compress(content, mtime=0)
+        digest = hashlib.sha256(content).hexdigest()
+        filename = digest + (".json.gz" if compressed else ".json")
+        (directory / filename).write_bytes(content)
+        files[filename] = digest
+        source.unlink()
+        return filename
+
+    for group in catalog["groups"]:
+        group["sample_file"] = asset(group["sample_file"])
+        group["all_files"] = [asset(name, compressed=True) for name in group["all_files"]]
+    content = json.dumps(catalog, separators=(",", ":"), sort_keys=True).encode()
+    (directory / "catalog.json").write_bytes(content)
+    files["catalog.json"] = hashlib.sha256(content).hexdigest()
+    manifest = {key: catalog[key] for key in ("schema_version", "policy", "hf_revision", "repo_id")}
+    manifest.update(files=files, observations=sum(group["n"] for group in catalog["groups"]))
+    (directory / "manifest.json").write_text(json.dumps(manifest))
 
 
 async def check():
@@ -49,6 +80,15 @@ async def check():
         (site / "fpm-accuracy/branches.json").write_text(
             json.dumps({"schema_version": 1, "default_branch": "main", "branches": entries})
         )
+        shutil.copytree(ROOT / "tests/fpm_accuracy/fixtures/dashboard", site / "fpm-accuracy/data")
+        prepare_visualization_fixtures(site / "fpm-accuracy/data/visualization")
+        history_path = site / "fpm-accuracy/data/history.json"
+        history = json.loads(history_path.read_text())
+        release_entry = copy.deepcopy(history["entries"][0])
+        release_entry["snapshot"]["branch"] = "release/0.12.0"
+        release_entry["trend"] = False
+        history["entries"].append(release_entry)
+        history_path.write_text(json.dumps(history))
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=site))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -75,13 +115,21 @@ async def check():
                 await expect(page.locator(".overview-model-row")).to_have_count(2)
                 await expect(page.locator("#freshness")).to_contain_text("Stale result")
                 await expect(page.locator("thead th")).to_have_count(7)
-                assert not await page.locator(
-                    'a[href*="evaluation-detail"], a[href*="coverage.html"], a[href*="trends.html"]'
-                ).count()
+                assert not await page.locator('a[href*="coverage.html"]').count()
+                await expect(page.locator(".fpm-tabs a")).to_have_count(4)
                 assert "op-based" not in await page.locator("body").inner_text()
                 await expect(page.locator(".overview-config-row").first).to_contain_text("7 excluded or unavailable")
                 await expect(page.locator(".overview-config-row").first).to_contain_text("80/100 predicted")
                 await expect(page.locator(".overview-config-row").first).to_contain_text("80.0% coverage")
+                await expect(
+                    page.locator(".overview-config-row").first.get_by_role("link", name="3D Viz →")
+                ).to_have_attribute(
+                    "href",
+                    "3d-visualization.html?configuration="
+                    + quote(data["rows"][0]["configuration_id"], safe="")
+                    + "&snapshot="
+                    + data["rows"][0]["snapshot_id"],
+                )
                 await page.locator('[data-model="Example/Alpha"]').click()
                 await expect(page.locator(".overview-config-row").first).to_be_hidden()
                 await page.locator('[data-model="Example/Alpha"]').click()
@@ -132,6 +180,102 @@ async def check():
                     await page.screenshot(
                         path=str(Path(screenshot).with_stem(Path(screenshot).stem + "-mobile")), full_page=True
                     )
+                await page.set_viewport_size({"width": 1400, "height": 1000})
+                await page.goto(url + "trends.html?branch=main")
+                await expect(page.locator("#trend-table tbody tr")).to_have_count(1)
+                await expect(page.locator("#trend-chart circle")).to_have_count(2)
+                await page.locator("#phase-filter").select_option("decode")
+                await page.locator("#trend-chart circle").first.focus()
+                await expect(page.locator("#trend-chart circle").first).to_be_focused()
+                await expect(page.locator("#trend-tooltip")).to_be_visible()
+                await page.keyboard.press("Escape")
+                await expect(page.locator("#trend-tooltip")).to_be_hidden()
+                await page.locator("#branch").select_option("release/0.12.0")
+                await expect(page.locator("#dashboard-status")).to_contain_text("main only")
+                await page.goto(url + "evaluation-detail.html?branch=main")
+                await expect(page.locator("#distribution table")).to_be_visible()
+                await page.locator("#phase-filter").select_option("decode")
+                await expect(page.locator("#error-heatmap table")).to_be_visible()
+                await page.locator("#method-filter").select_option("nowarmup")
+                await expect(page.locator("#error-heatmap")).to_contain_text("No FPM input")
+                await expect(page.locator("#error-heatmap table")).to_have_count(0)
+                await expect(page.locator("#distribution table")).to_be_visible()
+                await expect(page.locator("#variant-filter")).to_have_count(0)
+                await page.locator("#method-filter").select_option("warmup")
+                await expect(page.locator("#variant-evidence a")).to_contain_text("fpm-1")
+                await expect(page.locator("#error-heatmap table")).to_be_visible()
+                await page.locator("#search-filter").fill("nonexistent")
+                await expect(page.locator("#configuration-filter option")).to_have_count(0)
+                await page.locator("#search-filter").fill("")
+                await expect(page.locator("#distribution table")).to_be_visible()
+                await page.set_viewport_size({"width": 390, "height": 844})
+                assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                await page.set_viewport_size({"width": 1400, "height": 1000})
+                await page.goto(url + "3d-visualization.html")
+                await expect(page.locator("#gv-left-chart .plot-container")).to_be_visible(timeout=30000)
+                held = asyncio.Event()
+                release = asyncio.Event()
+
+                async def hold_chunk(route):
+                    held.set()
+                    await release.wait()
+                    await route.continue_()
+
+                await page.route("**/data/visualization/*.json.gz", hold_chunk)
+                # Capture the superseded redraw's completion, including all chunk loads.
+                await page.evaluate("""() => {
+                    const original = Promise.allSettled;
+                    Promise.allSettled = function(values) {
+                        Promise.allSettled = original;
+                        window.heldRedraw = original.call(Promise, values);
+                        return window.heldRedraw;
+                    };
+                }""")
+                await page.locator("#gv-density").select_option("all")
+                await asyncio.wait_for(held.wait(), timeout=10)
+                await page.locator("#gv-density").select_option("sample")
+                try:
+                    await page.wait_for_function(
+                        "document.querySelector('#gym-visualization').dataset.ready === 'true'",
+                        timeout=10000,
+                    )
+                    await expect(page.locator("#gv-left-chart .plot-container")).to_be_visible()
+                    await expect(page.locator("#gv-left-chart")).to_have_attribute("data-density", "sample")
+                finally:
+                    release.set()
+                await page.evaluate("async () => { await window.heldRedraw; }")
+                await expect(page.locator("#gv-left-chart")).to_have_attribute("data-density", "sample")
+                await expect(page.locator("#gv-right-chart")).to_have_attribute("data-density", "sample")
+                axes = await page.locator("#gv-x-axis option").evaluate_all("nodes => nodes.map(n=>n.value)")
+                assert len(axes) == 7
+                for x in axes:
+                    for y in axes:
+                        await page.locator("#gv-x-axis").select_option(x)
+                        await page.locator("#gv-y-axis").select_option(y)
+                        await page.wait_for_function(
+                            "document.querySelector('#gym-visualization').dataset.ready === 'true'"
+                        )
+                await page.evaluate(
+                    "Plotly.relayout(document.querySelector('#gv-left-chart'), {'scene.camera': {eye:{x:2,y:1,z:1}}})"
+                )
+                await page.locator("#gv-density").select_option("all")
+                await expect(page.locator("#gv-left-count")).to_contain_text("40")
+                await page.locator("#gv-phase").select_option("decode")
+                await page.locator("#gv-density").select_option("sample")
+                await expect(page.locator("#gv-error")).to_be_hidden()
+                await page.wait_for_function("document.querySelector('#gym-visualization').dataset.ready === 'true'")
+                async with page.expect_download() as download_info:
+                    await page.locator('#gv-left-chart [data-title*="Download"]').click()
+                download = await download_info.value
+                assert download.suggested_filename.endswith(".png")
+                if screenshot:
+                    await page.screenshot(path=str(Path(screenshot).with_stem("fpm-3d")), full_page=True)
+                await page.set_viewport_size({"width": 390, "height": 844})
+                assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                await page.goto(url + "trends.html?branch=main")
+                await page.route("**/data/history.json", lambda route: route.fulfill(status=404, body="{}"))
+                await page.reload()
+                await expect(page.locator("#dashboard-status")).to_contain_text("No completed dashboard evaluation")
                 assert not errors, errors
                 await browser.close()
         finally:
