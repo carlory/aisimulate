@@ -140,6 +140,23 @@ every row declares a consistent `measurement_policy`/`measurement_repeats`
 pair: `dynamo_native_single_sample_v1`/1 or `kvwarm_median_of_3`/3. Values are
 already aggregated by the producer; the loader preserves their latency.
 
+Schema 7 also accepts two backend-bound median policies, each tied to its own
+state protocol and timing boundary:
+
+| Backend | `measurement_policy` | `state_protocol` | `timing_boundary` |
+|---|---|---|---|
+| vLLM | `vllm_native_fpm_prefix_seed_median_v1` | `glm53flash_prefix_cache_real_seed_v1` | `dynamo_vllm_instrumented_scheduler_fpm_wall_time` |
+| SGLang | `sglang_native_fpm_radix_seed_median_v1` | `glm53flash_sglang_radix_real_seed_v1` | `sglang_native_fpm_rank0_device_timer_wall_time` |
+
+These policies preserve the producer's already-reduced `latency_ms`; the
+consumer neither averages it again nor divides it by the repeat count. The
+sidecar and every row must declare integer counts of 5 warmups and 10
+measurements, `global_warmup_iterations=0`, and the policy's protocol and
+boundary. Missing or inconsistent median metadata and `fake_fallback` KV rows
+are rejected before interpolation; the existing execution-identity and real-KV
+requirements still apply. The legacy `dynamo_native_single_sample_v1` contract
+is unchanged.
+
 For a Kimi K3 text profile, an explicit configuration can be:
 
 ```python
