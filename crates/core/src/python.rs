@@ -411,26 +411,23 @@ impl AicTimingConfig {
     }
 
     fn speculative_depth(&self) -> Result<u32> {
-        let Some(speculation) = &self.speculation else {
-            return Ok(self.nextn);
-        };
-        ensure!(
-            speculation.kind == "ngram",
-            "generic speculation is supported by the cost-model API only; replay requires ngram or legacy nextn"
-        );
-        ensure!(
-            self.nextn == 0,
-            "ngram speculation cannot be combined with nextn"
-        );
-        ensure!(
-            self.backend == "vllm",
-            "ngram speculation requires backend=vllm"
-        );
-        ensure!(
-            self.forward_model.as_deref().unwrap_or("op_level") == "op_level",
-            "ngram speculation requires op_level timing"
-        );
-        Ok(speculation.ngram_depth()?)
+        if let Some(speculation) = &self.speculation {
+            ensure!(self.nextn == 0, "speculation cannot be combined with nextn");
+            match speculation.kind.as_str() {
+                "none" => {}
+                "ngram" => ensure!(
+                    self.backend == "vllm",
+                    "ngram speculation requires backend=vllm"
+                ),
+                _ => ensure!(
+                    matches!(self.backend.as_str(), "vllm" | "sglang"),
+                    "{} speculative replay requires backend=vllm or backend=sglang",
+                    speculation.kind
+                ),
+            }
+            return Ok(crate::py::speculation_replay_depth(speculation)?);
+        }
+        Ok(self.nextn)
     }
 
     fn resolved_backend_version(&self) -> &str {
@@ -536,7 +533,6 @@ struct AicTimingModel {
 impl AicTimingModel {
     fn build(config: &mut AicTimingConfig, worker_type: ForwardPassWorkerType) -> Result<Self> {
         let request = config.estimator_request(worker_type)?;
-        config.validate_parallel_shape()?;
         config.resolved_memory_fraction()?;
         let model = Arc::new(
             ForwardPassPerfModel::best_available(request)
@@ -546,6 +542,10 @@ impl AicTimingModel {
             .provenance()
             .context("canonical estimator omitted construction provenance")?;
         config.backend_version = provenance.config.backend_version.clone();
+        config.speculation = provenance.config.speculation.clone();
+        // Canonical construction validates and resolves cost identity first;
+        // executor-specific width limits must not reclassify loader failures.
+        config.validate_parallel_shape()?;
         config.systems_path = provenance
             .selected_systems_root
             .as_ref()
@@ -1096,6 +1096,14 @@ fn materialize_aic_capacity(
     capacity_is_explicit: bool,
     estimate: impl FnOnce(&AicTimingConfig, &ReplayRoleConfig) -> Result<usize>,
 ) -> Result<()> {
+    ensure!(
+        capacity_is_explicit
+            || config
+                .speculation
+                .as_ref()
+                .is_none_or(|spec| matches!(spec.kind.as_str(), "none" | "ngram")),
+        "speculative replay requires explicit num_gpu_blocks including draft memory"
+    );
     config.validate_parallel_shape()?;
     let engine_backend = match role.rank.backend {
         Backend::Vllm => "vllm",
@@ -1326,6 +1334,24 @@ fn resolve_role_timing(
         resources.require_memory()?;
     }
     let mut timing = AicTimingModel::build(&mut config, worker_type)?;
+    if let Some(speculation) = &config.speculation {
+        ensure!(
+            speculation.kind == "ngram"
+                || role
+                    .rank
+                    .aic_nextn_accept_rates
+                    .as_deref()
+                    .is_some_and(|rates| !rates.trim().is_empty()),
+            "generic speculative replay requires explicit aic_nextn_accept_rates; \
+             configure expected_accepted_tokens in engine.speculation"
+        );
+        let depth = config.speculative_depth()? as usize;
+        ensure!(
+            role.rank.aic_nextn.is_none_or(|value| value == depth),
+            "aic_nextn conflicts with resolved speculative depth {depth}"
+        );
+        role.rank.aic_nextn = (depth > 0).then_some(depth);
+    }
     if let Some(model) = &timing.fpm_model
         && model.fpm_query_coverage()?.is_some()
     {
@@ -4003,14 +4029,74 @@ mod tests {
     }
 
     #[test]
-    fn replay_rejects_generic_schemes_and_unmodeled_ngram_parameters() {
+    fn replay_rejects_unsupported_depth_and_unmodeled_ngram_parameters() {
         for payload in [
-            serde_json::json!({"kind": "mtp", "params": {"depth": 2}}),
+            serde_json::json!({"kind": "mtp", "params": {"depth": 6}}),
             serde_json::json!({"kind": "ngram", "params": {"num_speculative_tokens": 2, "trigger_rate": 0.5}}),
         ] {
             let mut config = aic_config();
             config.speculation = Some(serde_json::from_value(payload).unwrap());
             assert!(config.validate_parallel_shape().is_err());
+        }
+    }
+
+    #[test]
+    fn replay_capacity_enforces_scheme_backend_scope_without_restricting_legacy() {
+        for (backend, native_backend) in [
+            ("vllm", Backend::Vllm),
+            ("sglang", Backend::Sglang),
+            ("trtllm", Backend::Trtllm),
+        ] {
+            let mut config = aic_config();
+            config.backend = backend.into();
+            config.speculation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "mtp", "params": {"depth": 2}
+                }))
+                .unwrap(),
+            );
+            let mut role = aggregated_role(&ReplayEngineConfig::default());
+            role.rank.backend = native_backend;
+            role.rank.aic_nextn = Some(2);
+            let generic = materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!());
+            if backend == "trtllm" {
+                assert!(
+                    generic
+                        .unwrap_err()
+                        .to_string()
+                        .contains("mtp speculative replay requires backend=vllm or backend=sglang")
+                );
+            } else {
+                generic.unwrap();
+            }
+
+            config.speculation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "ngram", "params": {"num_speculative_tokens": 2}
+                }))
+                .unwrap(),
+            );
+            let ngram = materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!());
+            if backend == "vllm" {
+                ngram.unwrap();
+            } else {
+                assert!(
+                    ngram
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ngram speculation requires backend=vllm")
+                );
+            }
+
+            config.speculation = None;
+            config.nextn = 2;
+            materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!()).unwrap();
+
+            config.speculation =
+                Some(serde_json::from_value(serde_json::json!({"kind": "none"})).unwrap());
+            config.nextn = 0;
+            role.rank.aic_nextn = None;
+            materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!()).unwrap();
         }
     }
 
@@ -4035,6 +4121,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(role.rank.num_gpu_blocks, 17);
+        let mut config = aic_config();
+        config.speculation = Some(
+            serde_json::from_value(serde_json::json!({"kind": "mtp", "params": {"depth": 3}}))
+                .unwrap(),
+        );
+        assert!(
+            materialize_aic_capacity(&config, &mut role, false, |_, _| unreachable!())
+                .unwrap_err()
+                .to_string()
+                .contains("explicit num_gpu_blocks")
+        );
+        role.rank.aic_nextn = Some(3);
+        materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!()).unwrap();
+        config.speculation =
+            Some(serde_json::from_value(serde_json::json!({"kind": "none"})).unwrap());
+        role.rank.aic_nextn = Some(2);
+        assert!(materialize_aic_capacity(&config, &mut role, true, |_, _| unreachable!()).is_err());
     }
 
     #[test]

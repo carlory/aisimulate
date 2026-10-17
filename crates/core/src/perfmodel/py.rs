@@ -1631,6 +1631,23 @@ pub(crate) fn resolve_speculation_identity(
     })
 }
 
+/// Check the existing replay executor against a canonical resolved cost identity.
+pub(crate) fn speculation_replay_depth(
+    config: &crate::ForwardPassSpeculationConfig,
+) -> Result<u32, AicError> {
+    Python::with_gil(|py| -> PyResult<_> {
+        let encoded = serde_json::to_string(config)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let fields = PyModule::import(py, "json")?.call_method1("loads", (encoded,))?;
+        PyModule::import(py, "aisimulate_core.sdk.speculation")?
+            .getattr("SpeculationConfig")?
+            .call((), Some(fields.downcast()?))?
+            .call_method0("replay_depth")?
+            .extract()
+    })
+    .map_err(|error| AicError::InvalidEngineConfig(format!("speculation: {error}")))
+}
+
 /// Profile schema/identity facts supplied by Python without choosing an estimator.
 #[derive(serde::Deserialize)]
 pub(crate) struct ForwardPassProfileFacts {
