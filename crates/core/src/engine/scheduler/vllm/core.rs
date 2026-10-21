@@ -22,7 +22,7 @@ use crate::engine::common::speculative::{
 use crate::engine::common::utils::{
     compute_prefill_handoff_delay_ms, prefill_handoff_transfer_timing,
 };
-use crate::engine::host_offload::G2Binding;
+use crate::engine::host_offload::{G2Binding, HostTierHandle};
 use crate::engine::kv_manager::AllocationRequirement;
 use crate::engine::kv_manager::{DestinationReservation, G1Acquire, NativeAllocation};
 use crate::engine::kv_manager::{G1Manager, GroupedKvPool};
@@ -42,8 +42,8 @@ use crate::engine::scheduler::{
 };
 use crate::engine::trace::TraceCollector;
 use crate::engine::{
-    CacheTierAttribution, DecodeAcceptance, G2Scope, HandoffId, PressureEvent, PressureKind,
-    PressureState, modeled_duration_ms,
+    CacheTierAttribution, DecodeAcceptance, G2Scope, HandoffId, KvHintSource, PressureEvent,
+    PressureKind, PressureState, modeled_duration_ms,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +718,17 @@ impl VllmCore {
             .as_mut()
             .expect("G3 requires G2")
             .set_g3(registry, node);
+    }
+
+    pub(crate) fn set_kvcr(
+        &mut self,
+        registry: crate::engine::kvcr::SharedKvcrRegistry,
+        rank: KvHintSource,
+    ) -> HostTierHandle {
+        self.native_host_offload
+            .as_mut()
+            .expect("KVCR requires G2")
+            .set_kvcr(registry, rank)
     }
 
     pub(crate) fn set_host_offload_observer(
@@ -1417,6 +1428,7 @@ impl VllmCore {
                 &sequence.lease,
                 self.args.block_size,
                 adapter.publishes_residency(),
+                request.kv_hint,
             ))
         });
         VllmRequestState {
@@ -1804,7 +1816,10 @@ impl VllmCore {
     ) -> anyhow::Result<EnginePassResult> {
         #[cfg(test)]
         let requests_before = self.state.requests.len();
-        let g3_epoch_before = self.native_host_offload.as_ref().and_then(|a| a.g3_epoch());
+        let retry_epoch_before = self
+            .native_host_offload
+            .as_ref()
+            .and_then(|a| a.retry_epoch());
         self.kv_manager.begin_step();
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
@@ -1937,7 +1952,11 @@ impl VllmCore {
                 && self.native_host_offload.is_some()
                 && self.state.has_materialized_waiting());
             let prioritize_connector_waiting = self.native_host_offload.is_some();
-            let g1_owner = g3_epoch_before.and_then(|_| {
+            // A G3 or KVCR restore can wake a connector waiter ahead of one
+            // that already holds reserved G1 for its load; serve that owner
+            // first so the restored head cannot block the space it waits for.
+            // A rank without G3 that has never pulled keeps plain G2 order.
+            let g1_owner = retry_epoch_before.and_then(|_| {
                 self.state.connector_waiting.iter().copied().find(|uuid| {
                     self.state.connector_waiting_members.contains(uuid)
                         && !self.state.connector_deadline_waiting_members.contains(uuid)
@@ -2333,10 +2352,10 @@ impl VllmCore {
         Ok(EnginePassResult {
             committed_requests,
             end_ms,
-            same_timestamp_retry: if g3_epoch_before.is_some()
+            same_timestamp_retry: if retry_epoch_before.is_some()
                 && end_ms == now_ms
                 && self.native_host_offload.as_ref().is_some_and(|a| {
-                    a.g3_epoch() != g3_epoch_before
+                    a.retry_epoch() != retry_epoch_before
                         || a.next_deadline().is_some_and(|d| d <= now_ms)
                 }) {
                 crate::engine::generalized::SameTimestampRetry::Retry
