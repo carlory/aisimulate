@@ -346,6 +346,8 @@ pub struct Engine {
     /// `(nextn + 1)` exactly as Python `_run_generation_phase:200`
     /// (`batch_size = batch_size * (model._nextn + 1)`). 0 disables scaling.
     nextn: u32,
+    pub(crate) profile_snapshot: Option<tempfile::TempDir>,
+    profile_phase: Option<bool>,
     /// Measured target+draft round identity. This is parsed once from the
     /// existing EngineConfig.extra map, not a new serialized Op field.
     fpm_execution_profile: Option<FpmExecutionBinding>,
@@ -366,6 +368,23 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    fn check_profile_phase(&self, prefill: bool) -> Result<(), AicError> {
+        if self.profile_phase.is_some_and(|phase| phase != prefill) {
+            return Err(crate::operators::measured_composite::invalid(
+                "query phase is not qualified by this profile",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_profile_telemetry(&self) -> Result<(), AicError> {
+        if self.profile_phase.is_some() {
+            return Err(crate::operators::measured_composite::invalid(
+                "execution profiles require direct homogeneous phase queries; mixed/aggregate telemetry is not qualified",
+            ));
+        }
+        Ok(())
+    }
     /// Build an `Engine` from a spec and a pre-loaded database.
     ///
     /// Extracts the op lists and the `nextn` scalar from `spec.engine`. The
@@ -417,6 +436,22 @@ impl Engine {
             generation_ops: spec.generation_ops,
             db,
             nextn,
+            profile_snapshot: None,
+            profile_phase: match spec
+                .engine
+                .extra
+                .get("execution_profile_phase")
+                .map(String::as_str)
+            {
+                None => None,
+                Some("prefill") => Some(true),
+                Some("decode") => Some(false),
+                _ => {
+                    return Err(crate::operators::measured_composite::invalid(
+                        "invalid profile phase",
+                    ));
+                }
+            },
             fpm_execution_profile,
             vision: spec.vision,
             tp_size: spec.engine.parallel.tp_size,
@@ -897,6 +932,7 @@ impl Engine {
         coverage: Option<&mut FpmQueryCoverage>,
         mut on_op: impl FnMut(&Op, PerformanceResult),
     ) -> Result<f64, AicError> {
+        self.check_profile_phase(true)?;
         // Python raises `ValueError` when `effective_isl <= 0`; mirror that.
         if runtime.prefix >= runtime.isl {
             return Err(AicError::InvalidEngineConfig(format!(
@@ -981,6 +1017,12 @@ impl Engine {
         stride: u32,
         mut on_op: impl FnMut(usize, &Op, PerformanceResult),
     ) -> Result<f64, AicError> {
+        self.check_profile_phase(false)?;
+        if self.profile_phase.is_some() && runtime.osl > 2 {
+            return Err(crate::operators::measured_composite::invalid(
+                "execution profiles support at most one decode step per query",
+            ));
+        }
         self.reject_full_round_surface("static generation trajectories")?;
         let bs = runtime
             .batch_size
@@ -1134,6 +1176,16 @@ impl Engine {
         total_past_kv_tokens: u32,
         coverage: Option<&mut FpmQueryCoverage>,
     ) -> Result<f64, AicError> {
+        if self.profile_phase.is_some() {
+            self.check_profile_phase(false)?;
+            if batch_size == 0 || total_past_kv_tokens % batch_size != 0 {
+                return Err(crate::operators::measured_composite::invalid(
+                    "decode profile requires a positive homogeneous batch",
+                ));
+            }
+            return self.predict_decode_latency(batch_size, total_past_kv_tokens / batch_size, 2);
+        }
+
         self.forward_pass_time_ms_with_coverage(
             &[ForwardPassMetrics {
                 scheduled_requests: crate::ScheduledRequestMetrics {
@@ -1256,6 +1308,7 @@ impl Engine {
         gen_seq_imbalance_correction_scale: f64,
         mut on_op: impl FnMut(MixedPass, &Op, PerformanceResult),
     ) -> Result<[f64; 4], AicError> {
+        self.reject_profile_telemetry()?;
         self.reject_full_round_surface("static mixed-step composition")?;
         if ctx_tokens == 0 && gen_tokens == 0 {
             return Ok([0.0; 4]);
@@ -1580,6 +1633,7 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<f64, AicError> {
+        self.check_profile_phase(false)?;
         self.reject_full_round_surface("mean-context static decode steps")?;
         if gen_tokens == 0 {
             return Ok(0.0);
@@ -1757,6 +1811,7 @@ impl Engine {
         prefix: u32,
         prefill: bool,
     ) -> Result<Vec<super::diagnostics::StaticOperationDiagnostics>, AicError> {
+        self.check_profile_phase(prefill)?;
         self.reject_full_round_surface("operation diagnostics")?;
         use super::diagnostics::{
             ExecutedFallback, OperationDetails, SolDiagnostics, StaticOperationDiagnostics,
@@ -1952,6 +2007,7 @@ impl Engine {
         self.reject_full_round_surface("per-operation static phases")?;
         let mut context = PerOpFold::for_plan("context", &self.context_plan);
         if matches!(mode, StaticMode::Context | StaticMode::Both) {
+            self.check_profile_phase(true)?;
             if runtime.prefix >= runtime.isl {
                 return Err(AicError::InvalidEngineConfig(format!(
                     "isl must be greater than 0 after removing prefix, but got {}",
@@ -2147,6 +2203,7 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<Vec<PerOpValueWithMetadata>, AicError> {
+        self.check_profile_phase(false)?;
         self.reject_full_round_surface("per-operation decode steps")?;
         let mut out = PerOpFold::new("generation");
         if gen_tokens == 0 {
@@ -2181,6 +2238,7 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
+        self.check_profile_phase(true)?;
         self.reject_full_round_surface("per-operation context queries")?;
         let mut out = PerOpFold::new("context");
         for &i in indices {
@@ -2216,6 +2274,7 @@ impl Engine {
         prefix: u32,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
+        self.check_profile_phase(false)?;
         self.reject_full_round_surface("per-operation generation queries")?;
         let mut out = PerOpFold::new("generation");
         for &i in indices {
@@ -2255,6 +2314,7 @@ impl Engine {
         imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
+        self.check_profile_phase(is_context)?;
         self.reject_full_round_surface("ad-hoc operation queries")?;
         let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
             AicError::InvalidEngineConfig(format!("evaluate_ops_json: invalid op list JSON: {e}"))
@@ -2304,6 +2364,7 @@ impl Engine {
         imbalance_correction_scale: f64,
         visual_block_upper_triangle: bool,
     ) -> Result<Vec<PerOpValue>, AicError> {
+        self.check_profile_phase(true)?;
         self.reject_full_round_surface("ad-hoc attention kernel queries")?;
         if visual_block_upper_triangle && prefix != 0 {
             return Err(AicError::InvalidEngineConfig(
@@ -2359,6 +2420,7 @@ impl Engine {
         imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpSolValue>, AicError> {
+        self.check_profile_phase(is_context)?;
         self.reject_full_round_surface("SOL operation queries")?;
         let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
             AicError::InvalidEngineConfig(format!(
@@ -2433,6 +2495,7 @@ impl Engine {
         capture: bool,
         mut coverage: Option<&mut FpmQueryCoverage>,
     ) -> Result<crate::ForwardPassEstimate, AicError> {
+        self.reject_profile_telemetry()?;
         if metrics_by_rank.is_empty() {
             return Err(AicError::InvalidForwardPassMetrics(
                 "at least one attention-DP rank metric required".to_string(),
@@ -2961,6 +3024,180 @@ mod tests {
             osl,
             ..Default::default()
         }
+    }
+
+    fn measured_profile_engine(prefill: bool, complete: bool) -> Engine {
+        use crate::operators::measured_composite::{MeasuredCell, MeasuredCompositeOp};
+
+        let db = build_engine(None).db;
+        let mut config = fixture_engine_config(None);
+        config.extra.insert(
+            "execution_profile_phase".into(),
+            if prefill { "prefill" } else { "decode" }.into(),
+        );
+        let values: &[f64] = if complete {
+            &[2.0, 5.0, 7.0, 11.0]
+        } else {
+            &[2.0]
+        };
+        let op = Op::MeasuredComposite(MeasuredCompositeOp {
+            name: "measured_scope".into(),
+            system: "b200_sxm".into(),
+            backend: "vllm".into(),
+            version: "0.24.0".into(),
+            is_context: prefill,
+            weight_bytes: 0.0,
+            scale_factor: 3.0,
+            cells: values
+                .iter()
+                .enumerate()
+                .map(|(i, &latency_ms)| MeasuredCell {
+                    shape: [2, 5 + i as u32, 0],
+                    latency_ms,
+                })
+                .collect(),
+        });
+        let (context, generation) = if prefill {
+            (vec![op], vec![])
+        } else {
+            (vec![], vec![op])
+        };
+        Engine::build(EngineSpec::new(config, context, generation), db).unwrap()
+    }
+
+    #[test]
+    fn execution_profile_decode_rejects_trajectories_for_scalar_and_per_op_queries() {
+        for complete in [false, true] {
+            let engine = measured_profile_engine(false, complete);
+            // Independent oracle: three executions of each exact measured scope.
+            let expected: &[f64] = if complete {
+                &[6.0, 15.0, 21.0, 33.0]
+            } else {
+                &[6.0]
+            };
+            for (i, &latency) in expected.iter().enumerate() {
+                assert_eq!(
+                    engine
+                        .predict_decode_latency_total(2, 8 + 2 * i as u32)
+                        .unwrap(),
+                    latency
+                );
+            }
+            for stride in [1, 32] {
+                let rt = runtime(2, 4, 5);
+                let errors = [
+                    engine
+                        .run_static(&rt, StaticMode::Generation, stride)
+                        .unwrap_err(),
+                    engine
+                        .run_static_per_op(&rt, StaticMode::Generation, stride)
+                        .unwrap_err(),
+                    engine
+                        .run_static_per_op_with_metadata(&rt, StaticMode::Generation, stride)
+                        .unwrap_err(),
+                ];
+                for error in errors {
+                    assert!(error.to_string().contains("one decode step"), "{error}");
+                }
+                assert_eq!(
+                    engine
+                        .run_generation_phase(&runtime(2, 4, 2), stride)
+                        .unwrap(),
+                    6.0
+                );
+                assert_eq!(
+                    engine
+                        .run_generation_phase(&runtime(2, 4, 1), stride)
+                        .unwrap(),
+                    0.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execution_profile_phase_guard_covers_per_op_consumers() {
+        let prefill = measured_profile_engine(true, false);
+        for batch in [0, 2] {
+            let errors = [
+                prefill.decode_step_per_op(batch, 4, 1, 1.0).unwrap_err(),
+                prefill
+                    .decode_step_per_op_with_metadata(batch, 4, 1, 1.0)
+                    .unwrap_err(),
+            ];
+            for error in errors {
+                assert!(
+                    error.to_string().contains("phase is not qualified"),
+                    "{error}"
+                );
+            }
+        }
+        let decode = measured_profile_engine(false, false);
+        for mode in [StaticMode::Context, StaticMode::Both] {
+            for error in [
+                decode
+                    .run_static_per_op(&runtime(2, 4, 2), mode, 32)
+                    .unwrap_err(),
+                decode
+                    .run_static_per_op_with_metadata(&runtime(2, 4, 2), mode, 32)
+                    .unwrap_err(),
+            ] {
+                assert!(
+                    error.to_string().contains("phase is not qualified"),
+                    "{error}"
+                );
+            }
+        }
+        // A valid decode profile keeps the existing empty-batch result.
+        assert!(decode.decode_step_per_op(0, 4, 1, 1.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn execution_profile_phase_guard_covers_ad_hoc_queries() {
+        let prefill = measured_profile_engine(true, false);
+        let decode = measured_profile_engine(false, false);
+        let opposite = [
+            prefill
+                .evaluate_ops_json("[]", false, 1, 4, 0, 1.0, None)
+                .unwrap_err(),
+            prefill
+                .evaluate_ops_sol_json("[]", false, 1, 4, 0, 1.0, None)
+                .unwrap_err(),
+            decode
+                .evaluate_ops_json("[]", true, 1, 4, 0, 1.0, None)
+                .unwrap_err(),
+            decode
+                .evaluate_ops_sol_json("[]", true, 1, 4, 0, 1.0, None)
+                .unwrap_err(),
+            decode
+                .evaluate_context_attention_kernels_json("[]", 1, 4, 0, 1.0, false)
+                .unwrap_err(),
+        ];
+        for error in opposite {
+            assert!(
+                error.to_string().contains("phase is not qualified"),
+                "{error}"
+            );
+        }
+        // The qualified phase still serves ad-hoc lists.
+        assert!(
+            prefill
+                .evaluate_ops_json("[]", true, 1, 4, 0, 1.0, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            decode
+                .evaluate_ops_json("[]", false, 1, 4, 0, 1.0, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            prefill
+                .evaluate_context_attention_kernels_json("[]", 1, 4, 0, 1.0, false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// GLM-5.3-Flash-shaped op list: per-layer names over repeated geometry,
