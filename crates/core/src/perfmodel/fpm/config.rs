@@ -26,6 +26,8 @@ pub enum EstimationMode {
     #[serde(alias = "fpm")]
     FpmInterpolation,
     FpmRegression,
+    /// Explicit artifact-backed forests; never part of automatic discovery.
+    FpmLearned,
 }
 
 impl EstimationMode {
@@ -33,7 +35,7 @@ impl EstimationMode {
         match self {
             Self::OpLevel => Some("op_level"),
             Self::FpmInterpolation => Some("fpm"),
-            Self::Auto | Self::FpmRegression => None,
+            Self::Auto | Self::FpmRegression | Self::FpmLearned => None,
         }
     }
 }
@@ -268,7 +270,15 @@ impl ForwardPassPerfModelConfig {
     /// adding transient registry facts to the serialized request.
     pub(crate) fn resolve_with_registration(mut self) -> Result<(Self, Option<bool>), AicError> {
         self.estimator_config.resolve_defaults();
+        if self.estimation_mode == EstimationMode::FpmLearned
+            && self.estimator_config.correction.mode == super::CorrectionMode::Auto
+        {
+            self.estimator_config.correction.mode = super::CorrectionMode::Hybrid;
+        }
         self.validate()?;
+        if self.estimation_mode == EstimationMode::FpmLearned {
+            self.estimator_config.fpm_learned.resolve_source()?;
+        }
         if let Some(speculation) = &self.speculation {
             #[cfg(feature = "python")]
             {
@@ -347,6 +357,45 @@ impl ForwardPassPerfModelConfig {
 
     pub(crate) fn validate(&self) -> Result<(), AicError> {
         crate::perfmodel::execution_profile::validate_config(self)?;
+        let learned = &self.estimator_config.fpm_learned;
+        if self.estimation_mode == EstimationMode::FpmLearned {
+            if self.fallback_policy != ForwardPassFallbackPolicy::Deny {
+                return Err(invalid_config(
+                    "fpm_learned requires fallback_policy='deny'",
+                ));
+            }
+            if learned.artifact_path.is_some() == learned.checkpoint_path.is_some() {
+                return Err(invalid_config(
+                    "fpm_learned requires exactly one artifact_path or checkpoint_path",
+                ));
+            }
+            if learned.adaptation == super::LearnedAdaptation::Online {
+                if learned.checkpoint_path.is_none() {
+                    return Err(invalid_config(
+                        "online learned adaptation requires checkpoint_path",
+                    ));
+                }
+                if self.estimator_config.correction.enabled {
+                    return Err(invalid_config(
+                        "online learned adaptation requires estimator_config.correction.enabled=false",
+                    ));
+                }
+            }
+            if self.nextn != 0
+                || self
+                    .speculation
+                    .as_ref()
+                    .is_some_and(|speculation| speculation.kind != "none")
+            {
+                return Err(invalid_config(
+                    "fpm_learned does not support speculative decoding",
+                ));
+            }
+        } else if learned.artifact_path.is_some() || learned.checkpoint_path.is_some() {
+            return Err(invalid_config(
+                "learned sources require explicit estimation_mode='fpm_learned'",
+            ));
+        }
         if self.estimator_config.fpm_interpolation.collect_coverage
             && (self.estimation_mode != EstimationMode::FpmInterpolation
                 || self.fallback_policy != ForwardPassFallbackPolicy::Deny
@@ -567,6 +616,56 @@ mod tests {
             .unwrap()
             .extend(value.as_object().unwrap().clone());
         serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn learned_configuration_rejects_fallback_before_loading_source() {
+        for policy in ["allow", "regression"] {
+            let error = config(serde_json::json!({
+                "estimation_mode": "fpm_learned",
+                "fallback_policy": policy,
+                "estimator_config": {"fpm_learned": {"artifact_path": "/missing/seed.json"}}
+            }))
+            .resolve()
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("fpm_learned requires fallback_policy='deny'")
+            );
+        }
+    }
+
+    #[test]
+    fn learned_configuration_accepts_disabled_speculation_and_validates_its_parameters() {
+        let mut config = config(serde_json::json!({
+            "estimation_mode": "fpm_learned",
+            "speculation": {"kind": "none"},
+            "estimator_config": {"fpm_learned": {"artifact_path": "seed.json"}}
+        }));
+        config.validate().unwrap();
+        config
+            .speculation
+            .as_mut()
+            .unwrap()
+            .params
+            .insert("unexpected".into(), true.into());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("none speculation does not accept parameters")
+        );
+        config.speculation.as_mut().unwrap().params.clear();
+        config.speculation.as_mut().unwrap().kind = "ngram".into();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("fpm_learned does not support speculative decoding")
+        );
     }
 
     #[test]

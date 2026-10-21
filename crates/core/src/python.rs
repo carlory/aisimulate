@@ -579,6 +579,11 @@ impl AicTimingModel {
         vision: bool,
     ) -> Result<Self> {
         let request = config.estimator_request(worker_type)?;
+        ensure!(
+            request.estimation_mode != EstimationMode::FpmLearned,
+            "fpm_learned requires complete ForwardPassMetrics; engine replay's phase-only timing \
+             interface cannot supply its batch features. Use the canonical FPM estimate/tune API"
+        );
         config.resolved_memory_fraction()?;
         if vision {
             ensure!(
@@ -4365,6 +4370,26 @@ mod tests {
                 .as_deref(),
             Some("sglang_flashinfer_trtllm_moe")
         );
+    }
+
+    #[test]
+    fn learned_replay_rejection_precedes_source_loading() {
+        for source in ["artifact_path", "checkpoint_path"] {
+            let mut config = aic_config();
+            config.estimation_mode = Some(EstimationMode::FpmLearned);
+            config.estimator_config = serde_json::from_value(serde_json::json!({
+                "fpm_learned": {(source): "/missing/learned-source"}
+            }))
+            .unwrap();
+            let error = AicTimingModel::build(&mut config, ForwardPassWorkerType::Decode, false)
+                .err()
+                .expect("learned replay must fail before constructing a model");
+            assert!(
+                error
+                    .to_string()
+                    .contains("engine replay's phase-only timing")
+            );
+        }
     }
 
     fn aic_config() -> AicTimingConfig {

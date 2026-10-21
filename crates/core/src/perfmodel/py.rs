@@ -2041,6 +2041,17 @@ impl PyForwardPassPerfModel {
         serde_json::to_string(&config).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Resolve the deployment identity used by learned artifacts and checkpoints.
+    #[staticmethod]
+    fn learned_identity(config_json: &str) -> PyResult<String> {
+        let config = parse_forward_pass_config(config_json)?
+            .resolve()
+            .map_err(aic_to_py)?;
+        let identity =
+            crate::perfmodel::fpm::canonical_learned_identity(&config).map_err(aic_to_py)?;
+        serde_json::to_string(&identity).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Size declarative resources using canonical configuration, without timing
     /// data or analytical graph construction.
     #[staticmethod]
@@ -2268,6 +2279,30 @@ impl PyForwardPassPerfModel {
                     .map_err(|e| PyValueError::new_err(format!("learned metadata serialize: {e}")))
             })
             .transpose()
+    }
+
+    fn learned_online_diagnostics(&self) -> PyResult<Option<String>> {
+        self.inner
+            .learned_online_diagnostics()
+            .map(|value| {
+                serde_json::to_string(&value)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn flush_updates(&mut self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.flush_updates())
+            .map_err(aic_to_py)
+    }
+
+    fn export_learned_artifact(&self) -> PyResult<String> {
+        self.inner.export_learned_artifact().map_err(aic_to_py)
+    }
+
+    fn save_online_checkpoint(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        py.allow_threads(|| self.inner.save_online_checkpoint(path))
+            .map_err(aic_to_py)
     }
 
     /// Estimate one forward-pass iteration in ms. `fpm_json` is one iteration as

@@ -136,6 +136,14 @@ class ForwardPassPerfModelConfig:
     ``{"kind": "periodic", "step": 64}``. These controls do not change
     ``estimation_mode`` selection: request ``"fpm_regression"`` explicitly
     to require regression.
+
+    Select ``estimation_mode="fpm_learned"`` for a supplied tree artifact or
+    online checkpoint. ``estimator_config.fpm_learned.adaptation`` selects
+    ``"frozen"`` (including independently usable hybrid calibration) or
+    ``"online"``. Online adaptation requires ``checkpoint_path`` and
+    ``estimator_config.correction.enabled=False``. Rust owns all online
+    defaults, validation, fitting, and checkpoint continuation. Learned models
+    are never added to the automatic estimator search.
     """
 
     model: str
@@ -206,7 +214,7 @@ class ForwardPassPerfModelConfig:
         if self.encoder_parallel is None:
             payload.pop("encoder_parallel")
         payload["transfer_policy"] = _resolve_forward_pass_transfer_policy(self.transfer_policy)
-        if self.estimation_mode != "fpm_regression" or self.systems_paths:
+        if self.estimation_mode not in {"fpm_regression", "fpm_learned"} or self.systems_paths:
             payload["systems_paths"] = _resolve_forward_pass_systems_paths(self.systems_paths)
         return payload
 
@@ -396,6 +404,16 @@ class RustForwardPassPerfModel:
         return json.loads(aisimulate_core.RustForwardPassPerfModel.normalize_config(_forward_pass_config_json(config)))
 
     @staticmethod
+    def learned_identity(config: ForwardPassPerfModelConfig | Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve the Rust-owned deployment identity for learned artifacts and checkpoints."""
+        import aisimulate_core
+
+        payload = config.to_dict() if isinstance(config, ForwardPassPerfModelConfig) else dict(config)
+        return json.loads(
+            aisimulate_core.RustForwardPassPerfModel.learned_identity(json.dumps(payload, allow_nan=False))
+        )
+
+    @staticmethod
     def estimate_cache_budget(
         config: ForwardPassPerfModelConfig | Mapping[str, Any], budget: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -427,7 +445,10 @@ class RustForwardPassPerfModel:
         source: str | os.PathLike[str] | dict[str, Any],
         options: dict[str, Any] | None = None,
     ) -> RustForwardPassPerfModel:
-        """API: ``from_learned(source, options=None)``.
+        """Compatibility adapter: ``from_learned(source, options=None)``.
+
+        Production callers should use ``best_available`` with an explicit
+        ``fpm_learned`` mode and its immutable model/execution identity.
 
         Description: create a forward-pass model from an offline-trained learned
         artifact (``aic_fpm_learned_forward_perf`` JSON produced by
@@ -462,6 +483,28 @@ class RustForwardPassPerfModel:
         """Trainer metadata embedded in a learned artifact; ``None`` for other modes."""
         raw = self._inner.learned_metadata()
         return None if raw is None else json.loads(raw)
+
+    def learned_online_diagnostics(self) -> dict[str, Any] | None:
+        """Return learned state diagnostics, or ``None`` for another estimator."""
+        raw = self._inner.learned_online_diagnostics()
+        return None if raw is None else json.loads(raw)
+
+    def flush_updates(self) -> None:
+        """Fit partial pending batches and expire globally aged feedback in every store."""
+        self._inner.flush_updates()
+
+    def export_learned_artifact(self) -> dict[str, Any]:
+        """Return the current forest as an inference artifact, without fitting state."""
+        return json.loads(self._inner.export_learned_artifact())
+
+    def save_online_checkpoint(self, path: str | os.PathLike[str]) -> None:
+        """Save the adaptive forest and retained fitting state for exact continuation.
+
+        Reload with ``best_available`` and ``fpm_learned.checkpoint_path``.
+        Configuration alone does not contain admitted observations. The target
+        directory must not already exist, even if empty.
+        """
+        self._inner.save_online_checkpoint(os.fspath(path))
 
     def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
         """API: ``model.estimate_forward_pass_time_ms(metrics) -> float | None``.
@@ -621,7 +664,7 @@ def _json_dumps(value: Any) -> str:
 
 def _forward_pass_config_json(config: ForwardPassPerfModelConfig | Mapping[str, Any]) -> str:
     payload = config.to_dict() if isinstance(config, ForwardPassPerfModelConfig) else dict(config)
-    if payload.get("estimation_mode") != "fpm_regression" or payload.get("systems_paths"):
+    if payload.get("estimation_mode") not in {"fpm_regression", "fpm_learned"} or payload.get("systems_paths"):
         payload["systems_paths"] = _resolve_forward_pass_systems_paths(tuple(payload.get("systems_paths") or ()))
     if "transfer_policy" in payload:
         payload["transfer_policy"] = _resolve_forward_pass_transfer_policy(payload["transfer_policy"])

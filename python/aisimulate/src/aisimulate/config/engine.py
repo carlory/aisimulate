@@ -54,6 +54,14 @@ def resolve_block_size(backend: str, configured: int | None) -> int:
     return {"vllm": 64, "sglang": 1, "trtllm": 32}[backend] if configured is None else int(configured)
 
 
+def _validate_replay_estimation_mode(mode: str | None) -> None:
+    if mode == "fpm_learned":
+        raise ValueError(
+            "fpm_learned requires complete ForwardPassMetrics; engine replay's phase-only timing "
+            "interface cannot supply its batch features. Use the canonical FPM estimate/tune API"
+        )
+
+
 class AFDTopologyPredictionConfig(StrictModel):
     """One concrete attention/FFN-disaggregated topology."""
 
@@ -375,7 +383,7 @@ class TimingConfig(StrictModel):
     type: Literal["default", "fixed", "polynomial"] = "default"
     forward_model: Literal["op_level", "fpm"] = Field(default="op_level", exclude=True)
     fpm_parquet_path: str | None = None
-    estimation_mode: Literal["auto", "op_level", "fpm_interpolation", "fpm_regression"] | None = None
+    estimation_mode: Literal["auto", "op_level", "fpm_interpolation", "fpm_regression", "fpm_learned"] | None = None
     fallback_policy: Literal["deny", "allow"] | None = None
     estimator_config: dict[str, Any] | None = None
     systems_paths: list[SystemsRoot] | None = Field(default=None, min_length=1)
@@ -403,6 +411,7 @@ class TimingConfig(StrictModel):
 
     @model_validator(mode="after")
     def _validate_timing(self) -> TimingConfig:
+        _validate_replay_estimation_mode(self.estimation_mode)
         if self.type != "default" and any(
             getattr(self, field) is not None
             for field in (
@@ -764,7 +773,7 @@ class EstimatorPolicyConfig(StrictModel):
     transfer_policy: str | list[str] | None = None
     systems_paths: list[SystemsRoot] | None = Field(default=None, min_length=1)
     systems_path: SystemsPath | None = Field(default=None, exclude=True)
-    estimation_mode: Literal["auto", "op_level", "fpm_interpolation", "fpm_regression"] = "auto"
+    estimation_mode: Literal["auto", "op_level", "fpm_interpolation", "fpm_regression", "fpm_learned"] = "auto"
     fallback_policy: Literal["deny", "allow"] = "deny"
     estimator_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -783,6 +792,7 @@ class EstimatorPolicyConfig(StrictModel):
 
     @model_validator(mode="after")
     def _supported_estimator_policies(self):
+        _validate_replay_estimation_mode(self.estimation_mode)
         mode = getattr(self, "mode", "aggregated")
         modes = mode.choices if hasattr(mode, "choices") else [mode]
         workers = getattr(self, "workers", None)
