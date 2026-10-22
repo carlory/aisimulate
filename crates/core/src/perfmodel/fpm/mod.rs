@@ -38,6 +38,7 @@ mod options;
 mod regression;
 mod resources;
 mod samples;
+mod selector;
 
 #[cfg(test)]
 mod tests;

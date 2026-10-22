@@ -144,6 +144,22 @@ class ForwardPassPerfModelConfig:
     ``estimator_config.correction.enabled=False``. Rust owns all online
     defaults, validation, fitting, and checkpoint continuation. Learned models
     are never added to the automatic estimator search.
+
+    ``fpm_learned.adaptation="causal_selector"`` selects between a frozen
+    hybrid-calibrated expert and an independent online forest. It requires
+    ``estimation_mode="fpm_learned"``, ``fallback_policy="deny"``, a training
+    ``checkpoint_path``, and correction enabled with mode ``"hybrid"`` or
+    ``"auto"``. ``estimator_config["selector"]`` controls the error EWMA:
+    ``alpha=0.025`` must be finite in ``(0, 1]``; ``margin=0.025`` must be
+    finite in ``[0, 1)``; ``warmup=10`` and ``persistence=1`` must be positive
+    integers. Nondefault selector settings are invalid in other modes.
+    Default selector settings are omitted from saved configurations; custom
+    settings survive reload. Rust owns these defaults and validation.
+    Use chronological estimate/tune pairs with complete iteration metrics;
+    phase-only replay, prediction and Sweeper callers reject learned modes.
+    ``learned_selector_diagnostics()`` exposes the per-key evidence. Combined
+    artifact export and full-state checkpoint saving are unsupported; standalone
+    online checkpoint continuation remains available.
     """
 
     model: str
@@ -489,12 +505,31 @@ class RustForwardPassPerfModel:
         raw = self._inner.learned_online_diagnostics()
         return None if raw is None else json.loads(raw)
 
+    def learned_selector_diagnostics(self) -> dict[str, Any] | None:
+        """Return causal selection evidence by forest store and query type.
+
+        Returns ``None`` unless ``fpm_learned.adaptation=causal_selector``.
+        Reading diagnostics does not admit observations or change selection.
+        """
+        raw = self._inner.learned_selector_diagnostics()
+        return None if raw is None else json.loads(raw)
+
     def flush_updates(self) -> None:
         """Fit partial pending batches and expire globally aged feedback in every store."""
         self._inner.flush_updates()
 
     def export_learned_artifact(self) -> dict[str, Any]:
-        """Return the current forest as an inference artifact, without fitting state."""
+        """Return the current forest as an inference artifact, without fitting state.
+
+        Calibration feedback and correction stores are excluded. Reloading a
+        frozen model's export starts with empty correction state and may change
+        calibrated predictions. Online exports contain the published forest,
+        excluding pending observations; use ``save_online_checkpoint`` to resume
+        fitting with retained state.
+
+        Combined selectors reject this operation: one forest cannot represent
+        both experts, calibration, and selection evidence.
+        """
         return json.loads(self._inner.export_learned_artifact())
 
     def save_online_checkpoint(self, path: str | os.PathLike[str]) -> None:
@@ -503,6 +538,8 @@ class RustForwardPassPerfModel:
         Reload with ``best_available`` and ``fpm_learned.checkpoint_path``.
         Configuration alone does not contain admitted observations. The target
         directory must not already exist, even if empty.
+        Combined selectors do not support full-state persistence and reject
+        this operation.
         """
         self._inner.save_online_checkpoint(os.fspath(path))
 
@@ -586,6 +623,13 @@ class RustForwardPassPerfModel:
         Readiness does not guarantee query coverage: another store may be cold,
         and spline predictions require an available linear prediction for the
         same query.
+
+        ``source`` is one of ``aic``, ``aic_with_correction``,
+        ``fallback_regression``, ``learned``, ``learned_with_correction``,
+        ``learned_online``, or ``learned_causal_selector``. It describes the
+        model, not an individual query's coverage. A combined selector keeps
+        ``learned_causal_selector`` across expert switches; inspect
+        ``learned_selector_diagnostics()`` for per-key selection.
         """
         return json.loads(self._inner.diagnostics())
 

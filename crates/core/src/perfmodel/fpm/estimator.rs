@@ -19,6 +19,8 @@ pub struct EstimatorConfig {
     pub fpm_regression: FpmRegressionConfig,
     #[serde(skip_serializing_if = "FpmLearnedConfig::is_default")]
     pub fpm_learned: FpmLearnedConfig,
+    #[serde(skip_serializing_if = "SelectorConfig::is_default")]
+    pub selector: SelectorConfig,
     pub correction: CorrectionConfig,
 }
 
@@ -29,6 +31,50 @@ pub enum LearnedAdaptation {
     #[default]
     Frozen,
     Online,
+    CausalSelector,
+}
+
+/// Causal expert selection using admitted pre-update relative errors.
+/// Kept outside FpmLearnedConfig so standalone online checkpoint layout stays stable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SelectorConfig {
+    pub alpha: f64,
+    pub warmup: usize,
+    pub margin: f64,
+    pub persistence: usize,
+}
+
+impl Default for SelectorConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.025,
+            warmup: 10,
+            margin: 0.025,
+            persistence: 1,
+        }
+    }
+}
+
+impl SelectorConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), AicError> {
+        let invalid =
+            |reason| AicError::InvalidEngineConfig(format!("estimator_config.selector: {reason}"));
+        if !self.alpha.is_finite() || !(0.0..=1.0).contains(&self.alpha) || self.alpha == 0.0 {
+            return Err(invalid("alpha must be finite and in (0, 1]"));
+        }
+        if !self.margin.is_finite() || !(0.0..1.0).contains(&self.margin) {
+            return Err(invalid("margin must be finite and in [0, 1)"));
+        }
+        if self.warmup == 0 || self.persistence == 0 {
+            return Err(invalid("warmup and persistence must be positive"));
+        }
+        Ok(())
+    }
 }
 
 /// Which parts of an online forest may change.
@@ -964,6 +1010,7 @@ impl EstimatorConfig {
 
     pub(crate) fn validate(&self) -> Result<(), AicError> {
         self.fpm_learned.validate()?;
+        self.selector.validate()?;
         self.fpm_regression.sampling.validate()?;
         validate_rebuild_interval(self.fpm_regression.fit.rebuild_interval)?;
         self.validate_linear()?;
@@ -1455,6 +1502,46 @@ pub(super) fn validate_rebuild_interval(interval: Option<usize>) -> Result<(), A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_selector_controls_preserve_previous_reader_configuration() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"selector": {}}),
+            serde_json::json!({"selector": SelectorConfig::default(), "fpm_learned": {}}),
+        ] {
+            let config: EstimatorConfig = serde_json::from_value(value).unwrap();
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert!(serialized.get("selector").is_none());
+            assert!(serialized.get("fpm_learned").is_none());
+            let restored: EstimatorConfig = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored, config);
+            assert_eq!(restored.selector, SelectorConfig::default());
+        }
+    }
+
+    #[test]
+    fn each_nondefault_selector_control_survives_serialization() {
+        for selector in [
+            serde_json::json!({"alpha": 0.125}),
+            serde_json::json!({"warmup": 2}),
+            serde_json::json!({"margin": 0.1}),
+            serde_json::json!({"persistence": 3}),
+            serde_json::json!({"alpha": 1.0, "warmup": 1, "margin": 0.0, "persistence": 2}),
+        ] {
+            let config: EstimatorConfig =
+                serde_json::from_value(serde_json::json!({"selector": selector})).unwrap();
+            config.selector.validate().unwrap();
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                serialized.get("selector").unwrap(),
+                &serde_json::to_value(&config.selector).unwrap()
+            );
+            assert!(serialized.get("fpm_learned").is_none());
+            let restored: EstimatorConfig = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored, config);
+        }
+    }
 
     #[test]
     fn default_learned_controls_preserve_existing_serialized_configuration() {

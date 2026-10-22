@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Learned forward-pass model configuration
 
-This page documents `estimator_config.fpm_learned` for the canonical
-performance-model API.
+This page documents `estimator_config.fpm_learned` and
+`estimator_config.selector` for the canonical performance-model API.
 Model, hardware, backend, topology, worker identity and shared correction controls are described
 in the [performance-model configuration reference](../configuration.md).
 For equations and hyperparameter semantics, see the
@@ -27,7 +27,9 @@ validation; native replay rejects it before loading the learned source.
 Supply exactly one of
 `estimator_config.fpm_learned.artifact_path` and `checkpoint_path`. Frozen
 adaptation accepts either source; online adaptation requires a training or runtime
-checkpoint and `estimator_config.correction.enabled: false`. Learned mode
+checkpoint and `estimator_config.correction.enabled: false`. The combined
+`causal_selector` adaptation requires a training seed checkpoint and enabled
+hybrid correction. Learned mode
 requires `fallback_policy: deny`; `allow` and the legacy `regression` policy
 are invalid configurations. Learned source open, checksum, parsing and identity
 errors fail construction. Learned mode also rejects active speculative decoding
@@ -40,7 +42,12 @@ it must not contain parameters or a draft checkpoint.
 - `fpm_learned`: an explicit forest source, `adaptation` (`frozen` by default),
   and Rust-owned online fitting controls. Frozen forests support the existing
   correction policies. Online forests consume feedback to update their trees and
-  require correction to be disabled. See the field table below.
+  require correction to be disabled. `causal_selector` retains a frozen hybrid
+  expert alongside the online forest and selects between their predictions.
+  See the field tables below.
+- `selector`: `alpha` (0.025), `warmup` (10), `margin` (0.025), and
+  `persistence` (1). These controls select the expert in `causal_selector`
+  adaptation; they do not change either expert's fitting objective.
 
 ## Learned forest and online fitting controls
 
@@ -54,9 +61,9 @@ nondefault control preserves the complete block, even without a source path.
 | Field | Default | Meaning and constraints |
 | --- | --- | --- |
 | `artifact_path` | `null` | Path to the inference JSON artifact. Explicit learned mode requires exactly one source path. An artifact alone supports frozen adaptation. Empty paths are invalid. |
-| `checkpoint_path` | `null` | Path to a seed training checkpoint or saved online checkpoint. Contains the forest, fitted bins, fitting metadata and required training state. Required for online adaptation; mutually exclusive with `artifact_path`. |
+| `checkpoint_path` | `null` | Path to a seed training checkpoint or saved online checkpoint. Contains the forest, fitted bins, fitting metadata and required training state. Required for online adaptation and the causal selector; the selector accepts training seeds only. Mutually exclusive with `artifact_path`. |
 | `source_sha256` | `null` | Optional 64-character hexadecimal digest of the artifact file or checkpoint manifest. Rust checks and fills this during normalization, pinning the source in the resolved configuration. Remove the old digest when intentionally changing source paths. |
-| `adaptation` | `frozen` | `frozen` preserves tree values and topology; `online` updates the forest from admitted feedback. Online adaptation requires `correction.enabled: false`. |
+| `adaptation` | `frozen` | `frozen` preserves tree values and topology; `online` updates the forest with correction disabled; `causal_selector` chooses between a frozen hybrid-calibrated forest and an independent online forest. The selector requires enabled hybrid correction and a training checkpoint. |
 | `update_mode` | `structural` | With online adaptation, `leaf_only` refits existing leaves; `structural` can rebuild subtrees within each seed tree's existing capacity. Neither adds trees nor relearns feature-bin thresholds. |
 | `recent_window` | `2048` | Positive maximum number of retained online observations per learned store. FIFO eviction removes the oldest recent observations; immutable training history is additional to this budget. |
 | `update_every` | `64` | Positive number of pending observations in a store that triggers a fitting batch. Predictions use the last published forest until fitting succeeds; `flush_updates()` processes a partial batch explicitly. |
@@ -123,9 +130,61 @@ learned store returns `None`; loading a different store or choosing another
 estimator is not a query-time fallback.
 
 `learned_online_diagnostics()` reports online fitting state and resource counts.
-`export_learned_artifact()` produces an inference snapshot; it does not preserve
-online continuation. `save_online_checkpoint(path)` writes a new checkpoint
-directory without implicitly flushing pending observations. Resume through the
-same canonical constructor with matching identity and fitting controls. See
+For standalone frozen or online adaptation, `export_learned_artifact()` produces
+an inference artifact containing only the current forest and artifact metadata.
+It excludes calibration feedback and correction stores: reloading an export
+from a calibrated frozen model starts with empty correction state, so its
+predictions can differ from the exporting model's calibrated predictions.
+For online adaptation, the export contains the published forest but excludes
+fitting state and pending observations. `save_online_checkpoint(path)` preserves
+that online continuation state in a new checkpoint directory without implicitly
+flushing pending observations. Resume through the same canonical constructor with matching
+identity and fitting controls. The combined selector rejects both export
+methods because neither format preserves all its state. See
 [the training and resume workflow](learned-forward-pass-model.md#online-tree-adaptation)
 for source export, observation ordering and checkpoint differences.
+
+## Causal expert selector controls
+
+Set `estimator_config.fpm_learned.adaptation: causal_selector` with explicit
+`estimation_mode: fpm_learned`. Construction requires a training seed checkpoint,
+`correction.enabled: true`, and `correction.mode: hybrid` (`auto` resolves to
+`hybrid`). The online controls above govern the adaptive expert; correction
+controls govern the stable expert. The stable forest never changes its leaves
+or splits, and the online forest receives no correction multiplier.
+
+Correction uses the [shared correction controls](../configuration.md#estimator-controls).
+The combined selector owns the fixed and dynamic sampling budgets independently
+in each learned forest store. It additionally separates correction histories by
+learned forest store; the coordinates and PR 493 hybrid policy are unchanged.
+
+All fields below belong to `estimator_config.selector`:
+
+Nondefault selector settings require both `estimation_mode: fpm_learned` and
+`adaptation: causal_selector`; other combinations fail validation. Default
+settings are accepted in every mode and omitted from serialized configurations
+so ordinary configurations remain readable by versions without the selector.
+Changing any selector field preserves the complete selector block on round trip.
+
+| Field | Default | Meaning and constraints |
+| --- | --- | --- |
+| `alpha` | `0.025` | Finite EWMA update fraction in `(0, 1]` for each expert's admitted fractional absolute percentage error. The first comparison initializes the averages directly. Larger values give recent comparisons more weight; this is separate from tree learning rate and calibration shrinkage. |
+| `warmup` | `10` | Positive number of valid comparisons required for a store/query key before it can switch experts. The stable expert starts active. The comparison that reaches this count can begin a qualifying streak. |
+| `margin` | `0.025` | Finite relative error advantage in `[0, 1)` required to challenge the active expert: `challenger_error < (1 - margin) * active_error`. This is a fraction of active error, not percentage points of MAPE. The test is symmetric in both directions and strict at the boundary. |
+| `persistence` | `1` | Positive number of consecutive qualifying comparisons of the same store/query key required to switch. A tie, insufficient advantage, or switch resets the streak. Other keys do not advance it. |
+
+Each model instance belongs to one worker. Its selector evidence is separated
+by the four learned forest stores and the three correction query kinds, for up
+to 12 keys. A key's count, error averages, active expert and streak use only
+its admitted labels. Calibration is also separated by forest store and query
+kind. Tree feedback remains shared across query kinds within the same forest
+store, as in standalone online adaptation. Both experts receive feedback even
+while inactive.
+
+Use a synchronous chronological sequence: estimate one iteration, then admit
+its complete FPM observation before processing the next. Tuning evaluates both
+experts before that label changes their state; a switch affects later queries.
+The interface does not retain a prediction ticket for delayed or reordered
+feedback. `learned_selector_diagnostics()` exposes the key-specific evidence.
+See [the selector workflow](learned-forward-pass-model.md#hybrid-calibration-with-a-causal-selector)
+and [its equations](online-gbdt-and-causal-selection.md#hybrid-calibration-with-a-causal-selector).

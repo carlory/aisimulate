@@ -115,8 +115,16 @@ def measure(root, arm):
             "fpm_learned": {"artifact_path": str(artifact), "adaptation": "frozen"},
         },
     }
-    if arm == "online":
+    if arm in ("online", "selector"):
         learned = {**ONLINE, "checkpoint_path": str(root / "seed")}
+        if arm == "selector":
+            learned["adaptation"] = "causal_selector"
+            config["estimator_config"]["selector"] = {
+                "alpha": 0.025,
+                "warmup": 10,
+                "margin": 0.025,
+                "persistence": 1,
+            }
         config["estimator_config"]["fpm_learned"] = learned
     start = time.perf_counter_ns()
     if arm == "base":
@@ -147,7 +155,7 @@ def measure(root, arm):
         model.tune_with_fpms([q])
         updates.append((time.perf_counter_ns() - start) / 1000)
     diagnostics = None if arm == "base" else model.learned_online_diagnostics()
-    if arm == "online":
+    if arm in ("online", "selector"):
         state = diagnostics["stores"]["pure_decode"]
         assert state["accepted_observations"] == 256
         assert state["recent_rows"] == 64 and state["pending_rows"] == 0
@@ -163,12 +171,8 @@ def measure(root, arm):
         "first_prediction_ms": first,
         "initial_predictions_ms": initial,
         "final_predictions_ms": final,
-        "initial_prediction_sha256": hashlib.sha256(
-            json.dumps(initial).encode()
-        ).hexdigest(),
-        "final_prediction_sha256": hashlib.sha256(
-            json.dumps(final).encode()
-        ).hexdigest(),
+        "initial_prediction_sha256": hashlib.sha256(json.dumps(initial).encode()).hexdigest(),
+        "final_prediction_sha256": hashlib.sha256(json.dumps(final).encode()).hexdigest(),
         "warm_query_us_rounds": warm,
         "warm_query_us_median": statistics.median(warm),
         "update_us_median": statistics.median(updates),
@@ -176,6 +180,7 @@ def measure(root, arm):
         "update_us_max": max(updates),
         "process_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "diagnostics": diagnostics,
+        "selector_diagnostics": (model.learned_selector_diagnostics() if arm == "selector" else None),
         "config": config if arm != "base" else "PR493 compatibility adapter",
     }
     print(json.dumps(answer, allow_nan=False))
@@ -183,10 +188,8 @@ def measure(root, arm):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["prepare", "base", "frozen", "online"])
+    parser.add_argument("action", choices=["prepare", "base", "frozen", "online", "selector"])
     parser.add_argument("root", type=Path)
     parser.add_argument("--history-rows", type=int, default=10000)
     args = parser.parse_args()
-    prepare(args.root, args.history_rows) if args.action == "prepare" else measure(
-        args.root, args.action
-    )
+    prepare(args.root, args.history_rows) if args.action == "prepare" else measure(args.root, args.action)

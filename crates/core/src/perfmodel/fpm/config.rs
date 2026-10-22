@@ -358,6 +358,14 @@ impl ForwardPassPerfModelConfig {
     pub(crate) fn validate(&self) -> Result<(), AicError> {
         crate::perfmodel::execution_profile::validate_config(self)?;
         let learned = &self.estimator_config.fpm_learned;
+        if self.estimator_config.selector != super::SelectorConfig::default()
+            && (self.estimation_mode != EstimationMode::FpmLearned
+                || learned.adaptation != super::LearnedAdaptation::CausalSelector)
+        {
+            return Err(invalid_config(
+                "non-default estimator_config.selector requires estimation_mode='fpm_learned' and adaptation='causal_selector'",
+            ));
+        }
         if self.estimation_mode == EstimationMode::FpmLearned {
             if self.fallback_policy != ForwardPassFallbackPolicy::Deny {
                 return Err(invalid_config(
@@ -378,6 +386,23 @@ impl ForwardPassPerfModelConfig {
                 if self.estimator_config.correction.enabled {
                     return Err(invalid_config(
                         "online learned adaptation requires estimator_config.correction.enabled=false",
+                    ));
+                }
+            }
+            if learned.adaptation == super::LearnedAdaptation::CausalSelector {
+                if learned.checkpoint_path.is_none() {
+                    return Err(invalid_config(
+                        "causal_selector requires a training checkpoint_path",
+                    ));
+                }
+                if !self.estimator_config.correction.enabled
+                    || !matches!(
+                        self.estimator_config.correction.mode,
+                        super::CorrectionMode::Auto | super::CorrectionMode::Hybrid
+                    )
+                {
+                    return Err(invalid_config(
+                        "causal_selector requires correction.enabled=true and correction.mode='hybrid' (or auto)",
                     ));
                 }
             }
@@ -616,6 +641,98 @@ mod tests {
             .unwrap()
             .extend(value.as_object().unwrap().clone());
         serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn nondefault_selector_requires_causal_selection_before_loading_sources() {
+        for mode in [
+            "auto",
+            "op_level",
+            "fpm_interpolation",
+            "fpm_regression",
+            "fpm_learned",
+        ] {
+            for adaptation in ["frozen", "online", "causal_selector"] {
+                if mode == "fpm_learned" && adaptation == "causal_selector" {
+                    continue;
+                }
+                for selector in [
+                    serde_json::json!({"alpha": 0.4}),
+                    serde_json::json!({"warmup": 3}),
+                    serde_json::json!({"margin": 0.1}),
+                    serde_json::json!({"persistence": 2}),
+                ] {
+                    let cfg = config(serde_json::json!({
+                        "estimation_mode": mode,
+                        "estimator_config": {
+                            "fpm_learned": {
+                                "checkpoint_path": (mode == "fpm_learned")
+                                    .then_some("/missing/selector-checkpoint"),
+                                "adaptation": adaptation
+                            },
+                            "selector": selector,
+                            "correction": {"enabled": adaptation != "online"}
+                        }
+                    }));
+                    let error = crate::ForwardPassPerfModel::best_available(cfg).unwrap_err();
+                    assert!(
+                        error.to_string().contains(
+                            "non-default estimator_config.selector requires estimation_mode='fpm_learned' and adaptation='causal_selector'"
+                        ),
+                        "{mode}/{adaptation}/{selector}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_selector_remains_valid_for_other_estimators() {
+        for mode in ["auto", "op_level", "fpm_interpolation", "fpm_regression"] {
+            let cfg = config(serde_json::json!({
+                "estimation_mode": mode,
+                "estimator_config": {"selector": super::super::SelectorConfig::default()}
+            }));
+            cfg.resolve().unwrap();
+        }
+        for adaptation in ["frozen", "online"] {
+            config(serde_json::json!({
+                "estimation_mode": "fpm_learned",
+                "estimator_config": {
+                    "fpm_learned": {
+                        "checkpoint_path": "/missing/selector-checkpoint",
+                        "adaptation": adaptation
+                    },
+                    "selector": super::super::SelectorConfig::default(),
+                    "correction": {"enabled": adaptation != "online"}
+                }
+            }))
+            .validate()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn causal_selector_accepts_custom_controls_and_disabled_speculation() {
+        for correction_mode in ["auto", "hybrid"] {
+            let cfg = config(serde_json::json!({
+                "estimation_mode": "fpm_learned",
+                "speculation": {"kind": "none"},
+                "estimator_config": {
+                    "fpm_learned": {
+                        "checkpoint_path": "/missing/selector-checkpoint",
+                        "adaptation": "causal_selector"
+                    },
+                    "selector": {"alpha": 0.4, "warmup": 3, "margin": 0.1, "persistence": 2},
+                    "correction": {"enabled": true, "mode": correction_mode}
+                }
+            }));
+            cfg.validate().unwrap();
+            let restored: ForwardPassPerfModelConfig =
+                serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+            assert_eq!(restored, cfg);
+            restored.validate().unwrap();
+        }
     }
 
     #[test]
