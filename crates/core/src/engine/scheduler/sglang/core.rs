@@ -1235,16 +1235,25 @@ impl SglangCore {
                 }
                 let observed = observed.unwrap_or_default();
                 // `maybe_cache_unfinished_req`: the observed forward's prefixes enter the
-                // radix cache now, after this iteration's batch was selected.
+                // radix cache now, after this iteration's batch was selected. The commits
+                // are in batch order, which `running` keeps, so search on from the last match.
+                // A retracted or cancelled request's commits were discarded with its outputs.
+                let mut cursor = 0;
+                let len = self.running.len();
                 for (request_id, tokens) in observed.cache_commits {
-                    let request = self
-                        .running
-                        .iter_mut()
-                        .chain(self.waiting.iter_mut())
-                        .find(|request| request.uuid == request_id);
-                    if let Some(request) = request {
-                        cache_prefix_through(request, &mut self.kv_manager, &self.config, tokens);
-                    }
+                    let Some(index) = (cursor..len)
+                        .chain(0..cursor)
+                        .find(|&index| self.running[index].uuid == request_id)
+                    else {
+                        continue;
+                    };
+                    cursor = index;
+                    cache_prefix_through(
+                        &mut self.running[index],
+                        &mut self.kv_manager,
+                        &self.config,
+                        tokens,
+                    );
                 }
                 let mut terminals = self
                     .running
