@@ -206,7 +206,10 @@ def test_prediction_materializes_rank_local_capacity_without_a_model(profile, ti
     assert reserved["num_gpu_blocks"] < lowered["num_gpu_blocks"]
 
 
-def test_speculative_round_prediction_preserves_progress_identity_and_observed_capacity(profile, timing_systems):
+@pytest.mark.parametrize("method", ["eagle3", "mtp"])
+def test_speculative_round_prediction_preserves_progress_identity_and_observed_capacity(
+    profile, timing_systems, method
+):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -221,7 +224,7 @@ def test_speculative_round_prediction_preserves_progress_identity_and_observed_c
     _observed_profile(profile, context=4096)
     execution = {
         "kind": "speculative_round",
-        "method": "eagle3",
+        "method": method,
         "num_draft_tokens": 3,
         "draft_model": "test/draft",
         "draft_revision": "2" * 40,
