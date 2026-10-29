@@ -1196,9 +1196,14 @@ engine:
 
 
 @pytest.mark.parametrize(
-    "backend,field,value", [("vllm", "prefill_schedule_interval", 4), ("sglang", "prefill_decode_interval", 20)]
+    "backend,field,value",
+    [
+        ("vllm", "prefill_schedule_interval", 4),
+        ("sglang", "prefill_decode_interval", 20),
+        ("vllm", "async_scheduling", False),
+    ],
 )
-def test_public_prefill_interval_reaches_native_execution_rank(tmp_path, backend, field, value):
+def test_public_scheduler_control_reaches_native_execution_rank(tmp_path, backend, field, value):
     path = tmp_path / "prediction.yaml"
     path.write_text(
         f"""\
@@ -2809,6 +2814,23 @@ def test_flat_controls_cannot_override_inactive_nested_identity():
 def test_flat_active_controls_reject_fixed_timing():
     args = {**_engine_args(), "aic_enable_eplb": True}
     with pytest.raises(ValueError, match="require an AIC timing"):
+        EngineReplayRunnerFactory(runtime=RecordingRuntime()).create(0).run(
+            _spec(
+                deployment=BackendDeploymentSpec(
+                    deployment_mode="agg",
+                    backend="vllm",
+                    backend_version="test",
+                    agg_engine_args=args,
+                    num_workers=1,
+                )
+            )
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", 0.0])
+def test_runner_rejects_non_boolean_async_scheduling(value):
+    args = {**_engine_args(), "async_scheduling": value}
+    with pytest.raises(ValueError, match="async_scheduling must be a boolean"):
         EngineReplayRunnerFactory(runtime=RecordingRuntime()).create(0).run(
             _spec(
                 deployment=BackendDeploymentSpec(

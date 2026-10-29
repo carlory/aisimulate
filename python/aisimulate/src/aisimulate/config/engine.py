@@ -146,6 +146,13 @@ class SchedulerPredictionConfig(StrictModel):
             "Rounds may be idle and do not count output tokens; zero disables the interval."
         ),
     )
+    async_scheduling: StrictBool | None = Field(
+        default=None,
+        description=(
+            "vLLM only: model vLLM's --async-scheduling, under which an arrival at a busy engine misses the "
+            "batch vLLM has already queued. Unset uses vLLM's default: on, except with ngram drafts."
+        ),
+    )
 
 
 class KvCapacityPredictionConfig(StrictModel):
@@ -1314,6 +1321,7 @@ def _validate_prediction_scheduler_backend(engine: EnginePredictionConfig) -> No
         for field, backend, default in (
             ("prefill_schedule_interval", "vllm", 1),
             ("prefill_decode_interval", "sglang", 0),
+            ("async_scheduling", "vllm", None),
         ):
             if engine.backend != backend and getattr(worker.scheduler, field) != default:
                 raise ValueError(f"workers.{role}.scheduler.{field} is supported only for backend={backend}")
@@ -1381,6 +1389,10 @@ def _validate_prediction_afd(engine: EnginePredictionConfig) -> None:
         companion = "decode" if afd.phase == "prefill" else "prefill"
         if configured != {companion}:
             raise ValueError(f"AFD phase={afd.phase!r} combined_with_pd=true requires only workers.{companion}")
+        # The AFD replay prices its companion from the companion model, which
+        # does not model async-scheduling admission.
+        if getattr(engine.workers, companion).scheduler.async_scheduling:
+            raise ValueError(f"AFD companion workers.{companion}.scheduler.async_scheduling=true is not modeled")
     else:
         if afd.phase != "both":
             raise ValueError("pure AFD prediction requires phase='both'; use combined_with_pd=true for one phase")
