@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Huawei Ascend 950DT (Atlas A5 generation), 8-card server. npu-smi on g-master1 reports
+# 8 healthy chips, 98304 MB HBM each (the 96GB tier) and 462-482 W draw under mixed load.
+# Official per-chip specs (HC2025 keynote, hiascend.com/hardware/cluster): 4 TB/s HBM, 1 PFLOPS
+# FP8, 2 TB/s total interconnect. BF16/INT8/FP32 peaks are unpublished; the TODO entries below
+# are placeholders to replace with M5 on-device measurements, not measurements.
+# Like b60, this is a non-CUDA device and carries no sm_version.
+
+data_dir: data/ascend_950dt # relative to systems_dir
+gpu:
+  vendor: ascend # nvidia | intel | ascend, explicit device-kind discrimination for non-CUDA systems
+  mem_bw: 4000000000000 # 4TB/s official, same for the 96GB and 144GB capacity tiers
+  mem_bw_empirical_scaling_factor: 1.0 # TODO M5 no effective-BW measurement on CANN yet, modify based on your own observations
+  mem_empirical_constant_latency: 0.0 # TODO M5 no kernel-launch/latency measurement on CANN yet
+  mem_capacity: 103079215104 # 96GiB, the tier observed on g-master1; the 144GB tier needs its own entry
+  fp32_flops: 34000000000000 # TODO M5 no official or third-party FP32 number, conservative bf16/16 placeholder
+  bfloat16_tc_flops: 547000000000000 # TODO M5 547TFLOPS is a third-party figure, Huawei never published BF16 peak
+  int8_tc_flops: 1034000000000000 # TODO M5 1034TOPS is a third-party figure, shares the FP8 tensor path
+  fp8_tc_flops: 1000000000000000 # 1PFLOPS FP8/MXFP8/HiF8 official. MXFP4 is 2PFLOPS but fp4_tc_flops models nvfp4, left unset
+  power: 500 # TODO visit 2 Watt placeholder, TDP unpublished, replace with npu-smi info -t power Power Limit
+
+node:
+  num_gpus_per_node: 8 # 8x Ascend950DT per node (observed on g-master1, npu-smi info -t topo 2026-10-29)
+  inter_node_bw: 50000000000  # TODO M5 Byte/s per NPU, single direction, conservative 400Gb/s placeholder, scale-out NICs unverified
+  intra_node_bw: 2000000000000  # Byte/s per NPU, single direction, 2TB/s official total interconnect over full-mesh UB, TODO M5 measured value is in the 1.68-2.0TB/s range
+  pcie_bw: 64000000000  # TODO M5 Byte/s, single direction, PCIe Gen5 x16 is community-sourced and host-side semantics under UB are unverified
+  p2p_latency: 0.00001  # TODO M5 10us placeholder, no UB p2p latency measurement yet
+
+# TODO fix this with hccl, use for memory usage computation
+misc:
+  nccl_mem: # TODO post-MVP zeros mean HCCL comm-buffer overhead is unmeasured, not absent
+    1: 0
+    2: 0
+    4: 0
+    8: 0
+  other_mem: 3758096384 # TODO M5 3.5GB runtime reserve carried over from the large-memory systems, not measured on CANN/torch_npu
