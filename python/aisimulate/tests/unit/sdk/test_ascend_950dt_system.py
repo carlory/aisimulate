@@ -113,9 +113,12 @@ class TestAscend950dtRegistration:
         assert policy.system_generations["ascend"] == frozenset({SYSTEM})
         assert policy.evidence_systems["ascend"] == SYSTEM
 
-    def test_registration_ships_no_perf_data_yet(self) -> None:
-        """M2 is registration only: collection (M3/M5) adds the databases."""
-        assert SYSTEM not in get_supported_databases()
+    def test_registration_now_carries_the_gemm_database(self) -> None:
+        """M2 was registration only; M4 staged the first gemm table for this
+        system, so the database discovery surface must name it. The rows
+        themselves are synthetic staging data and their consumption is pinned
+        by ``test_ascend_950dt_gemm_consumption.py``."""
+        assert "0.30.0rc2" in get_supported_databases()[SYSTEM]["vllm"]
 
 
 class TestExistingSystemsUnaffected:
