@@ -7,22 +7,25 @@ from aisimulate_core.sdk.backends.sglang_backend import SGLANGBackend
 from aisimulate_core.sdk.backends.trtllm_backend import TRTLLMBackend
 from aisimulate_core.sdk.backends.vllm_backend import VLLMBackend
 from aisimulate_core.sdk.backends.vllm_backend_xpu import VLLMXPUBackend
-from aisimulate_core.sdk.perf_database import is_xpu_system, is_xpu_system_spec
+from aisimulate_core.sdk.perf_database import VENDOR_INTEL, get_gpu_vendor, get_gpu_vendor_from_spec
 
 
 def get_backend(backend_name: str, system_name: str | None = None, system_spec=None) -> BaseBackend:
     """
     Get the backend class by the backend name.
 
-    On an XPU ``system_name``, vLLM is served by the XPU-calibrated subclass;
-    otherwise the default backends are returned.
+    On an Intel XPU ``system_name``, vLLM is served by the XPU-calibrated
+    subclass; otherwise the default backends are returned. The selection is a
+    positive vendor match (``gpu.vendor``): other non-NVIDIA devices must not
+    inherit the Intel-fitted coefficients just because they carry no
+    ``sm_version``.
 
     Raises:
         ValueError: If the backend name is not found.
     """
     name = common.BackendName[backend_name]
-    xpu = is_xpu_system_spec(system_spec) if system_spec is not None else is_xpu_system(system_name)
-    if name == common.BackendName.vllm and xpu:
+    vendor = get_gpu_vendor_from_spec(system_spec) if system_spec is not None else get_gpu_vendor(system_name)
+    if name == common.BackendName.vllm and vendor == VENDOR_INTEL:
         return VLLMXPUBackend()
 
     backend_map = {

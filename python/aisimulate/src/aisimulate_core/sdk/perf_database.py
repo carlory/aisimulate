@@ -403,26 +403,61 @@ def is_hopper_system(system_name: str | None) -> bool:
     return int(spec.get("gpu", {}).get("sm_version", -1)) == 90
 
 
-def _gpu_is_xpu(gpu: object, label: str) -> bool:
-    # XPU specs omit sm_version; NVIDIA specs carry it.
+# Device vendors a system spec may declare in `gpu.vendor`. The key is the
+# positive discrimination between hardware families: NVIDIA specs are the only
+# ones that carry `sm_version`, so every non-NVIDIA device used to look alike
+# ("no sm_version") and would inherit the Intel-calibrated backend.
+VENDOR_NVIDIA = "nvidia"
+VENDOR_INTEL = "intel"
+VENDOR_ASCEND = "ascend"
+KNOWN_GPU_VENDORS = frozenset({VENDOR_NVIDIA, VENDOR_INTEL, VENDOR_ASCEND})
+
+
+def _gpu_vendor(gpu: object, label: str) -> str:
+    """Resolve a GPU spec's vendor, migrating specs written before the key.
+
+    Legacy specs (no `gpu.vendor`) are classified exactly as before: NVIDIA
+    specs carry `sm_version`, and the only non-NVIDIA system that existed then
+    was Intel XPU. A declared vendor always wins, so a new non-NVIDIA device is
+    never classified by what it lacks.
+    """
     if not isinstance(gpu, dict):
         raise ValueError(f"Cannot resolve GPU spec for {label}")
-    return "sm_version" not in gpu
+    declared = gpu.get("vendor")
+    if declared is None:
+        return VENDOR_NVIDIA if "sm_version" in gpu else VENDOR_INTEL
+    if not isinstance(declared, str) or declared.strip().lower() not in KNOWN_GPU_VENDORS:
+        raise ValueError(
+            f"gpu.vendor for {label} must be one of {sorted(KNOWN_GPU_VENDORS)}, got {declared!r}. "
+            "Backend calibration is selected from this field; add the vendor explicitly."
+        )
+    return declared.strip().lower()
+
+
+def get_gpu_vendor(system_name: str | None) -> str | None:
+    """Vendor of a named system, or None when no system is given."""
+    if not system_name:
+        return None
+    return _gpu_vendor(load_system_spec(system_name).get("gpu"), f"system {system_name!r}")
+
+
+def get_gpu_vendor_from_spec(system_spec: object) -> str | None:
+    """Vendor of an already-loaded spec — avoids re-loading with a different
+    systems_paths than the database used."""
+    if not system_spec:
+        return None
+    return _gpu_vendor(system_spec.get("gpu"), "the loaded system spec")
 
 
 def is_xpu_system(system_name: str | None) -> bool:
-    """True for XPU systems. NVIDIA specs carry ``sm_version``; XPU specs do not."""
-    if not system_name:
-        return False
-    return _gpu_is_xpu(load_system_spec(system_name).get("gpu"), f"system {system_name!r}")
+    """True for Intel XPU systems (e.g. b60)."""
+    return get_gpu_vendor(system_name) == VENDOR_INTEL
 
 
 def is_xpu_system_spec(system_spec: object) -> bool:
     """Classify an already-loaded spec — avoids re-loading with a different
     systems_paths than the database used."""
-    if not system_spec:
-        return False
-    return _gpu_is_xpu(system_spec.get("gpu"), "the loaded system spec")
+    return get_gpu_vendor_from_spec(system_spec) == VENDOR_INTEL
 
 
 def build_no_databases_message() -> str:
