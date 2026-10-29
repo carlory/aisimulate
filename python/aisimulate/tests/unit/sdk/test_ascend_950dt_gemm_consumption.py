@@ -30,6 +30,7 @@ from aisimulate_core.sdk.operations.gemm import GEMM
 from aisimulate_core.sdk.perf_database import (
     get_database,
     get_supported_databases,
+    get_version_slots,
 )
 
 pytestmark = pytest.mark.unit
@@ -78,6 +79,26 @@ class TestBackendResolution:
 
     def test_backend_resolution_by_system_name_agrees(self) -> None:
         assert type(get_backend(BACKEND, SYSTEM)) is VLLMBackend
+
+
+class TestVersionSlotContainment:
+    """Review 003 F1: the `ascend_950dt` override in `query_versions.yaml` is
+    load-bearing for the *rest of the fleet* too. Override systems are excluded
+    from the fleet `next` derivation, so removing the pin would re-advertise
+    the vllm-ascend release string as the derived next vLLM slot of every
+    NVIDIA system."""
+
+    def test_ascend_is_pinned_to_the_vllm_ascend_release(self) -> None:
+        assert get_version_slots(SYSTEM, BACKEND) == {"current": VERSION}
+
+    @pytest.mark.parametrize(
+        "nvidia_system",
+        ["b200_sxm", "b300_sxm", "gb200", "gb300", "h100_sxm", "h200_sxm", "l40s", "rtx_pro_6000_server"],
+    )
+    def test_the_vllm_ascend_version_never_leaks_into_an_nvidia_slot(self, nvidia_system: str) -> None:
+        slots = get_version_slots(nvidia_system, BACKEND)
+        assert slots is not None
+        assert VERSION not in slots.values()
 
 
 class TestSupportMatrixCoverage:
