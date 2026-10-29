@@ -3758,7 +3758,10 @@ def get_device_module(device=None):
     elif torch.xpu.is_available():
         return torch.xpu
     # NPU is probed last: its probe imports torch_npu, so an in-tree accelerator
-    # must win before that side effect happens on a mixed host.
+    # must win before that side effect happens on a mixed host. collect.py's
+    # collect_vllm probes CUDA -> NPU -> XPU instead, because there the lane
+    # choice must not depend on an import side effect ordering; the two orders
+    # differ only on a host with both an Intel XPU and the Ascend plugin.
     npu = torch_npu_module()
     if npu is not None and npu.is_available():
         return npu

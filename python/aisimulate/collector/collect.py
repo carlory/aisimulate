@@ -2427,6 +2427,10 @@ def collect_vllm(
     elif _npu_available():
         # Ascend NPU (vllm-ascend). REGISTRY_NPU is wired here so the lane is
         # selected explicitly instead of falling through to the XPU arm.
+        # Probe order here is CUDA -> NPU -> XPU, while helper.get_device_str()
+        # probes CUDA -> XPU -> NPU so that the torch_npu import side effect
+        # happens last. The orders differ only on a host carrying both an Intel
+        # XPU and the Ascend plugin, which no supported node does.
         from collector.vllm.registry import REGISTRY_NPU as REGISTRY
 
         is_npu_backend = True
