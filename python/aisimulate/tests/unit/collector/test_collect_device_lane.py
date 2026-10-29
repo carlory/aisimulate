@@ -152,8 +152,8 @@ def _legacy_document(**overrides) -> dict:
 
 
 def test_identity_fields_carry_the_lane_key():
-    assert collect_mod._COLLECTOR_FRAMEWORK_FIELD in collect_mod._CHECKPOINT_IDENTITY_FIELDS
-    assert collect_mod._COLLECTOR_FRAMEWORK_FIELD not in collect_mod._LEGACY_CHECKPOINT_IDENTITY_FIELDS
+    assert "collector_framework" in collect_mod._CHECKPOINT_IDENTITY_FIELDS
+    assert "collector_framework" not in collect_mod._LEGACY_CHECKPOINT_IDENTITY_FIELDS
 
 
 def test_new_checkpoints_record_their_lane(tmp_path):
@@ -166,7 +166,7 @@ def test_new_checkpoints_record_their_lane(tmp_path):
         sm_version=None,
         collector_framework="vllm_npu",
     )
-    assert checkpoint._metadata[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "vllm_npu"
+    assert checkpoint._metadata["collector_framework"] == "vllm_npu"
 
 
 def test_lane_defaults_to_the_backend_when_unset(tmp_path):
@@ -178,21 +178,21 @@ def test_lane_defaults_to_the_backend_when_unset(tmp_path):
         framework_version="0.5.14",
         sm_version=100,
     )
-    assert checkpoint._metadata[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "sglang"
+    assert checkpoint._metadata["collector_framework"] == "sglang"
 
 
 def test_legacy_document_is_migrated_to_the_xpu_lane():
     identity = collect_mod._checkpoint_identity_from_document(_legacy_document())
-    assert identity[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "vllm_xpu"
+    assert identity["collector_framework"] == "vllm_xpu"
 
     cuda_identity = collect_mod._checkpoint_identity_from_document(_legacy_document(sm_version=90))
-    assert cuda_identity[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "vllm"
+    assert cuda_identity["collector_framework"] == "vllm"
 
 
 def test_explicit_lane_in_a_document_is_never_overridden():
-    document = _legacy_document(**{collect_mod._COLLECTOR_FRAMEWORK_FIELD: "vllm_npu"})
+    document = _legacy_document(collector_framework="vllm_npu")
     identity = collect_mod._checkpoint_identity_from_document(document)
-    assert identity[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "vllm_npu"
+    assert identity["collector_framework"] == "vllm_npu"
 
 
 def test_legacy_checkpoint_file_still_resumes(tmp_path):
@@ -231,29 +231,23 @@ def test_legacy_checkpoint_is_refused_by_a_different_lane(tmp_path):
         sm_version=None,
         collector_framework="vllm_npu",
     )
-    with pytest.raises(RuntimeError, match=collect_mod._COLLECTOR_FRAMEWORK_FIELD):
+    with pytest.raises(RuntimeError, match="collector_framework"):
         tracker.load_existing()
 
 
 def test_registered_table_uses_the_lane_not_the_missing_sm_version():
-    xpu_identity = collect_mod._checkpoint_identity_from_document(
-        _legacy_document(**{collect_mod._COLLECTOR_FRAMEWORK_FIELD: "vllm_xpu"})
-    )
+    xpu_identity = collect_mod._checkpoint_identity_from_document(_legacy_document(collector_framework="vllm_xpu"))
     assert collect_mod._registered_checkpoint_table(xpu_identity, backend="vllm") == "gemm_perf"
 
     # The NPU lane resolves against REGISTRY_NPU, which is still empty: no
     # unambiguous owner, and crucially not the XPU table.
-    npu_identity = collect_mod._checkpoint_identity_from_document(
-        _legacy_document(**{collect_mod._COLLECTOR_FRAMEWORK_FIELD: "vllm_npu"})
-    )
+    npu_identity = collect_mod._checkpoint_identity_from_document(_legacy_document(collector_framework="vllm_npu"))
     with pytest.raises(RuntimeError, match="no unambiguous registered table"):
         collect_mod._registered_checkpoint_table(npu_identity, backend="vllm")
 
 
 def test_registered_table_rejects_a_lane_from_another_backend():
-    identity = collect_mod._checkpoint_identity_from_document(
-        _legacy_document(**{collect_mod._COLLECTOR_FRAMEWORK_FIELD: "sglang"})
-    )
+    identity = collect_mod._checkpoint_identity_from_document(_legacy_document(collector_framework="sglang"))
     with pytest.raises(RuntimeError, match="invalid checkpoint producer identity"):
         collect_mod._registered_checkpoint_table(identity, backend="vllm")
 
@@ -261,6 +255,6 @@ def test_registered_table_rejects_a_lane_from_another_backend():
 def test_legacy_identity_record_is_accepted_and_migrated():
     legacy_record = {field: _legacy_document()[field] for field in collect_mod._LEGACY_CHECKPOINT_IDENTITY_FIELDS}
     migrated = collect_mod._normalized_identity_record(legacy_record)
-    assert migrated[collect_mod._COLLECTOR_FRAMEWORK_FIELD] == "vllm_xpu"
+    assert migrated["collector_framework"] == "vllm_xpu"
     assert collect_mod._normalized_identity_record({"backend": "vllm"}) is None
     assert collect_mod._normalized_identity_record("not-a-mapping") is None

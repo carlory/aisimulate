@@ -14,7 +14,7 @@ import functools
 import os
 import warnings
 
-from helper import get_device_module, get_device_str, npu_available
+from helper import get_device_module, get_device_str, torch_npu_module
 
 
 def setup_warning_filters():
@@ -132,7 +132,6 @@ _SIDECAR_TRANSACTION_FILENAME = SIDECAR_TRANSACTION_FILENAME
 _SIDECAR_STAGING_FILENAME = SIDECAR_STAGING_FILENAME
 _PERF_TRANSACTION_SCHEMA = "collector-perf-publication-v2"
 _PERF_TRANSACTION_FILENAME = PERF_TRANSACTION_FILENAME
-_COLLECTOR_FRAMEWORK_FIELD = "collector_framework"
 # `collector_framework` is the manifest framework key of the producing lane
 # ("vllm", "vllm_xpu", "vllm_npu", "trtllm", "sglang"). It disambiguates which
 # registry owns a checkpoint: the `backend` string alone is shared by every
@@ -141,21 +140,15 @@ _COLLECTOR_FRAMEWORK_FIELD = "collector_framework"
 _CHECKPOINT_IDENTITY_FIELDS = (
     "schema",
     "backend",
-    _COLLECTOR_FRAMEWORK_FIELD,
+    "collector_framework",
     "module",
     "run_func",
     "framework_version",
     "sm_version",
 )
 _LEGACY_CHECKPOINT_IDENTITY_FIELDS = tuple(
-    field for field in _CHECKPOINT_IDENTITY_FIELDS if field != _COLLECTOR_FRAMEWORK_FIELD
+    field for field in _CHECKPOINT_IDENTITY_FIELDS if field != "collector_framework"
 )
-# Framework keys whose ops live in a non-default registry symbol; mirrors
-# collector.framework_manifest._REGISTRY_SYMBOLS.
-_CHECKPOINT_REGISTRY_SYMBOLS = {
-    "vllm_xpu": "REGISTRY_XPU",
-    "vllm_npu": "REGISTRY_NPU",
-}
 _SIDECAR_TRANSACTION_FIELDS = {
     "schema",
     "transaction_id",
@@ -1157,10 +1150,10 @@ def _xpu_available() -> bool:
 
 
 def _npu_available() -> bool:
-    # torch.npu only exists after the out-of-tree torch_npu plugin is imported,
-    # so the probe lives in helper (it performs that import) and is tolerant of
-    # hosts without the plugin.
-    return torch is not None and npu_available()
+    # torch.npu exists only after the out-of-tree torch_npu plugin is imported,
+    # so the plugin import lives in helper.torch_npu_module().
+    npu = torch_npu_module() if torch is not None else None
+    return npu is not None and npu.is_available()
 
 
 def _wideep_registry_for_backend(backend: str) -> list:
@@ -1228,8 +1221,8 @@ def _legacy_collector_framework(backend: object, sm_version: object) -> object:
 def _checkpoint_identity_from_document(document: dict) -> dict:
     """Read a checkpoint document's producer identity, migrating legacy files."""
     identity = {field: document.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
-    if _COLLECTOR_FRAMEWORK_FIELD not in document:
-        identity[_COLLECTOR_FRAMEWORK_FIELD] = _legacy_collector_framework(identity["backend"], identity["sm_version"])
+    if "collector_framework" not in document:
+        identity["collector_framework"] = _legacy_collector_framework(identity["backend"], identity["sm_version"])
     return identity
 
 
@@ -1246,7 +1239,7 @@ def _normalized_identity_record(identity: object) -> dict | None:
         return dict(identity)
     if set(identity) == set(_LEGACY_CHECKPOINT_IDENTITY_FIELDS):
         migrated = dict(identity)
-        migrated[_COLLECTOR_FRAMEWORK_FIELD] = _legacy_collector_framework(identity["backend"], identity["sm_version"])
+        migrated["collector_framework"] = _legacy_collector_framework(identity["backend"], identity["sm_version"])
         return migrated
     return None
 
@@ -1282,7 +1275,7 @@ class ResumeCheckpoint:
         self._metadata = {
             "schema": RESUME_SCHEMA_VERSION,
             "backend": backend,
-            _COLLECTOR_FRAMEWORK_FIELD: collector_framework or backend,
+            "collector_framework": collector_framework or backend,
             "module": module_name,
             "run_func": run_func_name,
             "framework_version": framework_version,
@@ -2840,18 +2833,19 @@ def _resume_tracker_for_collection(
 
 def _registered_checkpoint_table(identity: dict, *, backend: str) -> str:
     """Resolve a checkpoint producer to its registry-owned table."""
+    from collector.framework_manifest import _REGISTRY_SYMBOLS
     from collector.version_resolver import resolve_module
 
     if set(identity) != set(_CHECKPOINT_IDENTITY_FIELDS) or identity.get("backend") != backend:
         raise RuntimeError(f"checkpoint producer identity is not bound to {backend}: {identity!r}")
     framework_version = identity.get("framework_version")
     sm_version = identity.get("sm_version")
-    collector_framework = identity.get(_COLLECTOR_FRAMEWORK_FIELD)
+    collector_framework = identity.get("collector_framework")
     # A lane key is either the stock framework (shared by its WideEP workload,
     # which collects from the same REGISTRY) or one of its device lanes.
     known_lane = isinstance(collector_framework, str) and (
         collector_framework == backend
-        or (collector_framework in _CHECKPOINT_REGISTRY_SYMBOLS and collector_framework.startswith(f"{backend}_"))
+        or (collector_framework in _REGISTRY_SYMBOLS and collector_framework.startswith(f"{backend}_"))
     )
     if (
         identity.get("schema") != RESUME_SCHEMA_VERSION
@@ -2867,7 +2861,7 @@ def _registered_checkpoint_table(identity: dict, *, backend: str) -> str:
         raise RuntimeError(f"invalid checkpoint producer identity: {identity!r}")
 
     registry_module = importlib.import_module(f"collector.{backend}.registry")
-    registry_symbol = _CHECKPOINT_REGISTRY_SYMBOLS.get(collector_framework)
+    registry_symbol = _REGISTRY_SYMBOLS.get(collector_framework)
     if registry_symbol is not None:
         # A device lane (e.g. vllm_xpu / vllm_npu) owns its own registry symbol.
         registry = list(getattr(registry_module, registry_symbol))

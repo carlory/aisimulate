@@ -306,12 +306,7 @@ def benchmark_with_power(
     # Neither mode guarantees CUDA recovery after an interrupted capture.
     try:
         is_cuda = dev_mod is torch.cuda  # match the requested device, not just host capability
-        # Graph capture exists for CUDA and XPU only. Bind the XPU arm to the
-        # requested device module (not host capability) so a non-CUDA/non-XPU
-        # device — e.g. Ascend NPU, which runs eager in the MVP — can never be
-        # routed into XPUGraph capture.
-        is_xpu = dev_mod is getattr(torch, "xpu", None)
-        use_graph = use_cuda_graph and (is_cuda or is_xpu)
+        use_graph = use_cuda_graph and (is_cuda or torch.xpu.is_available())
         if use_graph:
             graph_cls = torch.cuda.CUDAGraph if is_cuda else torch.xpu.XPUGraph
             graph_ctx = torch.cuda.graph if is_cuda else torch.xpu.graph
@@ -3726,11 +3721,11 @@ def xpu_graph_measure_enabled() -> bool:
 
 
 def torch_npu_module():
-    """Return ``torch.npu`` (Ascend), or None when the plugin is unavailable.
+    """Return ``torch.npu``, or None when the torch_npu plugin is unavailable.
 
     Unlike CUDA and XPU, ``torch.npu`` does not exist in stock PyTorch: the
     out-of-tree ``torch_npu`` plugin attaches it as an import side effect, so
-    the probe has to import it before asking anything about the device.
+    callers cannot probe the device with ``hasattr(torch, "npu")`` alone.
     """
     import torch
 
@@ -3740,12 +3735,6 @@ def torch_npu_module():
         except ImportError:
             return None
     return getattr(torch, "npu", None)
-
-
-def npu_available() -> bool:
-    """True when the torch_npu plugin is installed and an NPU is visible."""
-    npu = torch_npu_module()
-    return npu is not None and bool(npu.is_available())
 
 
 def get_device_module(device=None):
@@ -3784,6 +3773,7 @@ def get_device_str():
         return "cuda"
     elif torch.xpu.is_available():
         return "xpu"
-    elif npu_available():
+    npu = torch_npu_module()
+    if npu is not None and npu.is_available():
         return "npu"
     raise RuntimeError("No supported device (need CUDA, XPU or NPU)")
