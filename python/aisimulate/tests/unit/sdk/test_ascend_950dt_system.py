@@ -53,8 +53,13 @@ class TestAscend950dtSystemSpec:
         assert gpu["mem_capacity"] == 96 * 1024**3
         assert gpu["mem_bw"] == 4e12  # official 4TB/s
         assert gpu["fp8_tc_flops"] == 1e15  # official 1 PFLOPS FP8/MXFP8/HiF8
+        # Official BF16/FP16 peak of the top 36-Cube-Core tier (white paper
+        # table 3-1); which of the 547/486/425 tiers this node is is an M5 check.
+        assert gpu["bfloat16_tc_flops"] == 547e12
         assert node["num_gpus_per_node"] == 8
-        assert node["intra_node_bw"] == 2e12  # official 2TB/s total interconnect (full-mesh UB)
+        # Per-NPU single direction: the official 2TB/s is the chip's *total*
+        # interconnect over the full-mesh UB fabric, halved per direction.
+        assert node["intra_node_bw"] == 1e12
 
     def test_vendor_is_ascend_and_no_sm_version(self, spec: SystemSpec) -> None:
         """Explicit vendor discrimination; non-CUDA devices carry no sm_version."""
@@ -64,7 +69,7 @@ class TestAscend950dtSystemSpec:
     def test_unofficial_flops_entries_are_positive_placeholders(self, spec: SystemSpec) -> None:
         """Strict per-dtype resolution rejects missing or non-positive entries."""
         gpu = spec["gpu"]
-        for key in ("bfloat16_tc_flops", "int8_tc_flops", "fp32_flops"):
+        for key in ("int8_tc_flops", "fp32_flops"):
             assert gpu[key] > 0, f"{key} must stay positive until M5 measurement replaces it"
 
     def test_spec_satisfies_the_rust_system_spec_contract(self, spec: SystemSpec) -> None:
