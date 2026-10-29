@@ -222,3 +222,9 @@ REGISTRY_XPU: list[OpEntry] = [
         perf_filename=PerfFile.MOE,
     ),
 ]
+
+# Ascend NPU (vllm-ascend) lane. Deliberately empty until the gemm collector
+# and the digest-pinned `vllm_npu` manifest entry land together: an op entry
+# here without its manifest pin would make the runtime unresolvable, and a
+# manifest entry without ops would fail `validate_resolution`.
+REGISTRY_NPU: list[OpEntry] = []

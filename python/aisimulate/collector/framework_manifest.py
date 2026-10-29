@@ -137,12 +137,19 @@ _REGISTRY_MODULES = {
     "wideep_trtllm": "collector.wideep.trtllm.registry",
 }
 
+# Framework keys whose ops live in a non-default symbol of the same registry
+# module. Device-specific vLLM lanes share `collector.vllm.registry`.
+_REGISTRY_SYMBOLS = {
+    "vllm_xpu": "REGISTRY_XPU",
+    "vllm_npu": "REGISTRY_NPU",
+}
+
 
 def _registry_entries(framework_key: str) -> list[OpEntry]:
     module_path = _REGISTRY_MODULES.get(framework_key)
     if module_path is None:
         raise KeyError(f"No collector registry is known for framework {framework_key!r}")
-    registry_name = "REGISTRY_XPU" if framework_key == "vllm_xpu" else "REGISTRY"
+    registry_name = _REGISTRY_SYMBOLS.get(framework_key, "REGISTRY")
     return list(getattr(importlib.import_module(module_path), registry_name))
 
 
