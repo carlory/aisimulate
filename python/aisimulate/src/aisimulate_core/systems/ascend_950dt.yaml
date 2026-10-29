@@ -28,9 +28,9 @@ node:
   # Byte/s per NPU, single direction -- the unit every other spec here uses (b60.yaml:18-19).
   # Official "Ascend 950 NPU Architecture White Paper" §4.6: UB IO bandwidth 2016 GB/s
   # (bidirectional, per chip) = 72 lane x 112 Gbps x 2 / 8, so the per-chip unidirectional
-  # upper bound is ~1008 GB/s. The white paper does not publish the scale-up/scale-out port
-  # split (the 18 x4 ports are multiplexed between them), so 1e12 sits inside the cited
-  # bound and stays conservative; TODO M5 calibrate with an in-node hccl_test measurement.
+  # bound is ~1008 GB/s -- and that bound assumes all 18 x4 ports serve scale-up, while the
+  # white paper says they are multiplexed with scale-out. 1e12 therefore sits AT the cited
+  # upper bound, not below it; TODO M5 must calibrate it downward with an in-node hccl_test.
   intra_node_bw: 1000000000000
   pcie_bw: 64000000000  # TODO M5 Byte/s, single direction; the white paper §4.6 table lists PCIe IO 128 GB/s bidirectional (PCIe 5.0 x16), i.e. 64 GB/s one way -- host-side semantics under the UB fabric stay unverified
   p2p_latency: 0.00001  # TODO M5 10us placeholder, no UB p2p latency measurement yet

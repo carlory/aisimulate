@@ -97,6 +97,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
     get_device_module(device).set_device(device)
+    # TODO M5: NPU visibility is governed by ASCEND_RT_VISIBLE_DEVICES
+    # (CUDA_VISIBLE_DEVICES has no effect); multi-card parallel collection
+    # must pin its workers with the former (offline-research B6).
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 

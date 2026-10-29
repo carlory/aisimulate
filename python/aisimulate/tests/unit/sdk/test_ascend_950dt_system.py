@@ -57,8 +57,10 @@ class TestAscend950dtSystemSpec:
         # table 3-1); which of the 547/486/425 tiers this node is is an M5 check.
         assert gpu["bfloat16_tc_flops"] == 547e12
         assert node["num_gpus_per_node"] == 8
-        # Per-NPU single direction: the official 2TB/s is the chip's *total*
-        # interconnect over the full-mesh UB fabric, halved per direction.
+        # Per-NPU single direction, derived from the same white paper §4.6 figure
+        # as the yaml comment: 2016 GB/s bidirectional = 72 lane x 112 Gbps x 2 / 8,
+        # i.e. a ~1008 GB/s unidirectional bound that already assumes every one of
+        # the 18 x4 ports is scale-up. M5 must calibrate the value downward.
         assert node["intra_node_bw"] == 1e12
 
     def test_vendor_is_ascend_and_no_sm_version(self, spec: SystemSpec) -> None:
