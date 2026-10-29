@@ -71,6 +71,7 @@ def test_manifest_records_the_image_abi_read_from_the_image_layers():
     assert abi["torch"] == "2.10.0"
     assert abi["torch_npu"] == "2.10.0.post7"  # not the matrix's 2.10.0.post4
     assert abi["triton_ascend"] == "3.6.0+dev20260923230212"  # not 3.2.2
+    assert abi["triton"] == "3.6.0"  # uninstalled by the Dockerfile, pulled back by triton-ascend (B7)
     assert abi["vllm"] == "0.30.0"
     assert abi["soc_version"] == "ascend950dt_9582"
 
