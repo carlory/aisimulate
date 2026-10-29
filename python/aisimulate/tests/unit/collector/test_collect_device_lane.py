@@ -54,11 +54,22 @@ def _stub_vllm_version(monkeypatch, version="0.28.0"):
     monkeypatch.setitem(sys.modules, "vllm.version", module)
 
 
-def _run_collect_vllm(monkeypatch, *, cuda, npu, xpu):
+def _stub_vllm_ascend_version(monkeypatch, version="0.30.0rc2"):
+    module = type(sys)("vllm_ascend")
+    module.__version__ = version
+    monkeypatch.setitem(sys.modules, "vllm_ascend", module)
+
+
+def _run_collect_vllm(monkeypatch, *, cuda, npu, xpu, with_vllm_ascend=True):
     """Run collect_vllm on a stubbed host, returning what it dispatched to."""
     from collector import framework_manifest
 
     _stub_vllm_version(monkeypatch)
+    if with_vllm_ascend:
+        _stub_vllm_ascend_version(monkeypatch)
+    else:
+        # A None entry makes `import vllm_ascend` raise, as on a host without it.
+        monkeypatch.setitem(sys.modules, "vllm_ascend", None)
     monkeypatch.setattr(collect_mod, "_cuda_available", lambda: cuda)
     monkeypatch.setattr(collect_mod, "_npu_available", lambda: npu)
     monkeypatch.setattr(collect_mod, "_xpu_available", lambda: xpu)
@@ -93,8 +104,16 @@ def test_npu_host_selects_the_npu_lane(monkeypatch):
     # The data backend directory stays "vllm" — only the lane key differs.
     assert observed["backend"] == "vllm"
     assert observed["provenance_ctx"]["collector_framework"] == "vllm_npu"
-    # M1 wires the lane; REGISTRY_NPU op entries land with the manifest pin.
-    assert observed["collections"] == []
+    # The lane's version axis is vllm-ascend, not base vLLM (0.28.0 here).
+    assert observed["installed_version"] == "0.30.0rc2"
+    assert [collection["module"] for collection in observed["collections"]] == ["collector.vllm.collect_gemm_npu"]
+
+
+def test_npu_lane_refuses_to_run_without_vllm_ascend(monkeypatch):
+    """Fail closed: the lane never falls back to the base vLLM version."""
+    observed = _run_collect_vllm(monkeypatch, cuda=False, npu=True, xpu=False, with_vllm_ascend=False)
+    assert observed["provenance_ctx"] is None
+    assert "collector_framework" not in observed
 
 
 def test_cuda_wins_over_npu_and_npu_wins_over_xpu(monkeypatch):
@@ -239,11 +258,10 @@ def test_registered_table_uses_the_lane_not_the_missing_sm_version():
     xpu_identity = collect_mod._checkpoint_identity_from_document(_legacy_document(collector_framework="vllm_xpu"))
     assert collect_mod._registered_checkpoint_table(xpu_identity, backend="vllm") == "gemm_perf"
 
-    # The NPU lane resolves against REGISTRY_NPU, which is still empty: no
-    # unambiguous owner, and crucially not the XPU table.
+    # The NPU lane resolves against REGISTRY_NPU — its own gemm entry, never
+    # the XPU one.
     npu_identity = collect_mod._checkpoint_identity_from_document(_legacy_document(collector_framework="vllm_npu"))
-    with pytest.raises(RuntimeError, match="no unambiguous registered table"):
-        collect_mod._registered_checkpoint_table(npu_identity, backend="vllm")
+    assert collect_mod._registered_checkpoint_table(npu_identity, backend="vllm") == "gemm_perf"
 
 
 def test_registered_table_rejects_a_lane_from_another_backend():

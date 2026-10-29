@@ -2234,7 +2234,9 @@ def collect_ops(
                     try:
                         if not check_compat(declared, runtime_version):
                             if _xpu_available():
-                                # Disable vllm xpu runtime version check for now
+                                # Disable vllm xpu runtime version check for now.
+                                # The NPU lane is deliberately not exempted: it
+                                # fails closed on a version mismatch.
                                 logger.warning(
                                     f"module {module_name} declares __compat__={declared!r}, \
                                     runtime is v{runtime_version}"
@@ -2424,8 +2426,7 @@ def collect_vllm(
         from collector.vllm.registry import REGISTRY
     elif _npu_available():
         # Ascend NPU (vllm-ascend). REGISTRY_NPU is wired here so the lane is
-        # selected explicitly instead of falling through to the XPU arm; its
-        # op entries and the matching `vllm_npu` manifest pin land together.
+        # selected explicitly instead of falling through to the XPU arm.
         from collector.vllm.registry import REGISTRY_NPU as REGISTRY
 
         is_npu_backend = True
@@ -2436,13 +2437,28 @@ def collect_vllm(
     else:
         raise RuntimeError("No supported hardware detected. Neither CUDA, NPU nor XPU is available.")
 
-    try:
-        from vllm.version import __version__ as vllm_version
+    if is_npu_backend:
+        # The NPU lane's version axis is the vllm-ascend release (it carries the
+        # Ascend kernels, so it is the kernel-source identity), not base vLLM.
+        # Fail closed: no fallback to vllm.version, which would silently pin the
+        # data to the wrong axis.
+        try:
+            from vllm_ascend import __version__ as vllm_ascend_version
 
-        version = vllm_version
-    except Exception:
-        logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
-        return None, None
+            version = vllm_ascend_version
+        except Exception:
+            logger.exception(
+                "vllm-ascend is not installed. Please install it from https://github.com/vllm-project/vllm-ascend"
+            )
+            return None, None
+    else:
+        try:
+            from vllm.version import __version__ as vllm_version
+
+            version = vllm_version
+        except Exception:
+            logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
+            return None, None
 
     from collector.framework_manifest import require_collector_runtime
 

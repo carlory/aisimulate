@@ -223,8 +223,16 @@ REGISTRY_XPU: list[OpEntry] = [
     ),
 ]
 
-# Ascend NPU (vllm-ascend) lane. Deliberately empty until the gemm collector
-# and the digest-pinned `vllm_npu` manifest entry land together: an op entry
-# here without its manifest pin would make the runtime unresolvable, and a
-# manifest entry without ops would fail `validate_resolution`.
-REGISTRY_NPU: list[OpEntry] = []
+# Ascend NPU (vllm-ascend) lane. MVP scope is gemm in bf16 eager mode; the
+# `vllm_npu` manifest pin resolves these entries, and both must stay in sync
+# (an op entry without its pin is unresolvable, a pin without ops fails
+# `validate_resolution`).
+REGISTRY_NPU: list[OpEntry] = [
+    OpEntry(
+        op="gemm",
+        module="collector.vllm.collect_gemm_npu",
+        get_func="get_gemm_test_cases",
+        run_func="run_gemm",
+        perf_filename=PerfFile.GEMM,
+    ),
+]
