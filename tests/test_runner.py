@@ -1243,7 +1243,7 @@ def test_runner_materializes_aic_capacity_before_native_execution(monkeypatch):
     engine_args.pop("timing_model")
     engine_args["aic_backend_version"] = "test"
     engine_args["aic_nextn"] = 3
-    engine_args["aic_pp_size"] = 2
+    engine_args["aic_pp_size"] = 1
     engine_args["gpu_memory_utilization"] = 0.8
     engine_args["cuda_graph_reserved_bytes"] = 14559947612
     engine_args["systems_path"] = "/tmp/custom-systems.yaml"
@@ -1267,16 +1267,73 @@ def test_runner_materializes_aic_capacity_before_native_execution(monkeypatch):
     assert runtime.execution_spec["engine"]["rank"]["num_gpu_blocks"] == 321
     assert runtime.execution_spec["engine"]["num_gpu_blocks_is_explicit"] is False
     timing_config = runtime.execution_spec["engine"]["rank"]["timing_model"]["config"]
-    assert timing_config["pp"] == 2
+    assert timing_config["pp"] == 1
     assert timing_config["systems_path"] == "/tmp/custom-systems.yaml"
     assert timing_config["gpu_memory_utilization"] == 0.8
     assert timing_config["cuda_graph_reserved_bytes"] == 14559947612
-    assert calls[0]["pp_size"] == 2
+    assert calls[0]["pp_size"] == 1
     assert calls[0]["systems_path"] == "/tmp/custom-systems.yaml"
     assert calls[0]["gpu_memory_utilization"] == 0.8
     assert calls[0]["cuda_graph_reserved_bytes"] == 14559947612
     assert "cuda_graph_reserved_bytes" not in runtime.execution_spec["engine"]["rank"]
     assert "nextn" not in calls[0]
+
+
+def _forbid_capacity(monkeypatch):
+    def unexpected_capacity(*args, **kwargs):
+        pytest.fail("unsupported pipeline parallelism reached capacity estimation")
+
+    monkeypatch.setattr(aic, "estimate_num_gpu_blocks", unexpected_capacity)
+
+
+@pytest.mark.parametrize(
+    ("role", "source"),
+    [(role, "deployment") for role in ("aggregated", "prefill", "decode")]
+    + [("aggregated", source) for source in ("flat", "null_rank", "nested", "canonical", "canonical_alias")],
+)
+def test_runner_rejects_pipeline_parallelism_before_capacity(monkeypatch, role, source):
+    _forbid_capacity(monkeypatch)
+    parallel = {}
+    args = _engine_args(role=role)
+    rank = _materialize_engine_role("vllm", "test", parallel, args, role)["rank"]
+    if source in ("deployment", "flat"):
+        args.pop("num_gpu_blocks")
+        args.pop("timing_model")
+    if source == "deployment":
+        parallel["pp" if role == "aggregated" else f"{role}_pp"] = 2
+    elif source == "flat":
+        args["aic_pp_size"] = 2
+    elif source == "null_rank":
+        args.update(rank=None, aic_pp_size=2)
+    elif source == "nested":
+        args = {"rank": {**rank, "aic_pp_size": 2}}
+    else:
+        rank["timing_model"] = {
+            "type": "external",
+            "provider": "aic",
+            "config": {"pp" if source == "canonical" else "pp_size": 2},
+        }
+        args = {"rank": rank}
+    with pytest.raises(ValueError, match=f"does not support pipeline parallelism for {role}"):
+        _materialize_engine_role("vllm", "test", parallel, args, role)
+
+
+def test_runner_rejects_decode_pipeline_parallelism_before_prefill_capacity(monkeypatch):
+    _forbid_capacity(monkeypatch)
+    prefill = _engine_args(role="prefill")
+    prefill.pop("num_gpu_blocks")
+    decode = {**_engine_args(role="decode"), "aic_pp_size": 2}
+    deployment = BackendDeploymentSpec(
+        deployment_mode="disagg",
+        backend="vllm",
+        backend_version="test",
+        prefill_engine_args=prefill,
+        decode_engine_args=decode,
+        num_prefill_workers=1,
+        num_decode_workers=1,
+    )
+    with pytest.raises(ValueError, match="does not support pipeline parallelism for decode"):
+        EngineReplayRunnerFactory(runtime=RecordingRuntime()).create(0).run(_spec(deployment=deployment))
 
 
 def test_runner_rejects_nested_inferred_capacity_when_fixed_timing_discards_reservation():
@@ -3154,3 +3211,17 @@ def test_gym_mtp_acceptance_reaches_runner_scheduler_and_timing(accepted, rates)
     assert rank["aic_nextn"] == 2
     assert rank["timing_model"]["config"]["nextn"] == 2
     assert rank["timing_model"]["config"]["forward_model"] == "op_level"
+
+
+@pytest.mark.parametrize("role", ["aggregated", "prefill", "decode"])
+def test_prediction_compile_rejects_pipeline_parallelism_before_capacity(monkeypatch, role):
+    _forbid_capacity(monkeypatch)
+    roles = ["aggregated"] if role == "aggregated" else ["prefill", "decode"]
+    # Fixed timing sizes each role's KV cache at compile time, so a late check would reach the stub.
+    fixed = {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0}
+    workers = {name: {"timing": fixed, "parallelism": {"pipeline": 2 if name == role else 1}} for name in roles}
+    engine = {"model": "example/model", "hardware": "h200_sxm", "context_length": 1024, "workers": workers}
+    if role != "aggregated":
+        engine["mode"] = "disaggregated"
+    with pytest.raises(ValueError, match=f"does not support pipeline parallelism for {role}"):
+        prediction_to_replay_spec(CorePredictionConfig.model_validate({"engine": engine}))

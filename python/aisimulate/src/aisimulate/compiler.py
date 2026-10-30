@@ -11,6 +11,7 @@ from typing import Any
 from .capacity import (
     estimate_kv_bytes_per_token,
     materialize_aic_num_gpu_blocks,
+    reject_pipeline_parallelism,
     resolve_model_context_length,
 )
 from .config.cli import CorePredictionConfig
@@ -236,6 +237,11 @@ def _deployment(
             performance_model=afd_performance_model or AICAFDPerformanceModel(),
         )
     mode = "agg" if engine.mode == "aggregated" else "disagg"
+    # Check every replayed role before any role sizes its state or KV cache.
+    for role in ("aggregated",) if mode == "agg" else ("prefill", "decode"):
+        worker = getattr(engine.workers, role)
+        if worker is not None:
+            reject_pipeline_parallelism(role, worker.parallelism.pipeline)
     if mode == "disagg":
         from aisimulate_core.sdk.perf_database import load_system_spec
 

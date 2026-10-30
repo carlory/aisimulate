@@ -20,7 +20,7 @@ import numpy as np
 
 from aisimulate_core.sdk import ForwardPassPerfModelConfig, RustForwardPassPerfModel
 
-from .capacity import materialize_aic_num_gpu_blocks
+from .capacity import materialize_aic_num_gpu_blocks, reject_pipeline_parallelism
 from .config.common import ENGINE_MODEL_CONTROL_FIELDS, is_active_engine_model_control
 from .config.engine import StateCacheConfig, _validate_replay_estimation_mode
 from .power import normalize_power_summary, power_metadata
@@ -1073,6 +1073,9 @@ def _materialize_engine_execution_spec(
     elif deployment_mode == "disagg":
         raw_prefill = _required_engine_args(deployment.prefill_engine_args, "prefill")
         raw_decode = _required_engine_args(deployment.decode_engine_args, "decode")
+        # Check both roles before either one estimates capacity.
+        for raw, role in ((raw_prefill, "prefill"), (raw_decode, "decode")):
+            _reject_role_pipeline_parallelism(deployment.parallel_config, raw, role)
         prefill = _materialize_engine_role(
             deployment.backend,
             deployment.backend_version,
@@ -1504,6 +1507,29 @@ def materialize_engine_launch_config(
     )
 
 
+def _reject_role_pipeline_parallelism(
+    parallel_config: Mapping[str, JSONValue], role_config: Mapping[str, JSONValue], role: str
+) -> None:
+    # `rank: null` falls back to the flat role fields during materialization.
+    rank = role_config.get("rank")
+    if rank is None:
+        rank = role_config
+    if not isinstance(rank, Mapping):
+        return
+    timing = rank.get("timing_model")
+    timing_config = timing.get("config") if isinstance(timing, Mapping) else None
+    if not isinstance(timing_config, Mapping):
+        timing_config = {}
+    reject_pipeline_parallelism(
+        role,
+        parallel_config.get("pp" if role == "aggregated" else f"{role}_pp", 1),
+        role_config.get("aic_pp_size", 1),
+        rank.get("aic_pp_size", 1),
+        timing_config.get("pp", 1),
+        timing_config.get("pp_size", 1),
+    )
+
+
 def _materialize_engine_role(
     deployment_backend: str,
     deployment_backend_version: str,
@@ -1519,6 +1545,7 @@ def _materialize_engine_role(
     # New generic schemes use caller-authored capacity; leave the existing
     # Ngram/NextN capacity paths unchanged.
     requested_rank = role_config.get("rank", role_config)
+    _reject_role_pipeline_parallelism(parallel_config, role_config, role)
     if isinstance(requested_rank, Mapping):
         timing = requested_rank.get("timing_model")
         timing_config = timing.get("config", {}) if isinstance(timing, Mapping) else {}
