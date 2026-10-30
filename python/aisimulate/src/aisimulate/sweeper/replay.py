@@ -258,7 +258,12 @@ class ReplayReport:
 
 @dataclass(frozen=True)
 class ReplayOutputRequirements:
-    """Optional detail requested from a Runner without changing replay semantics."""
+    """Optional detail requested from a Runner.
+
+    Capture fields never change replay semantics. ``defer_encoder_overlay`` does: an
+    analytical EPD replay returns its language report, and the caller applies each
+    encoder pool's overlay.
+    """
 
     include_raw_report: bool = False
     capture_per_request: bool = False
@@ -266,6 +271,7 @@ class ReplayOutputRequirements:
     telemetry_sample_interval_ms: float = 1000.0
     capture_memory_diagnostics: bool = False
     capture_performance_diagnostics: bool = False
+    defer_encoder_overlay: bool = False
 
     def __post_init__(self) -> None:
         interval = self.telemetry_sample_interval_ms
@@ -400,6 +406,7 @@ class RunnerCapabilities:
     supports_generic_speculation: bool = False
     supports_tokenization: bool = False
     supports_detokenization: bool = False
+    supports_deferred_encoder_overlay: bool = False
 
     def supports_backend_topology(self, backend: str, topology: str) -> bool:
         """Return whether a backend/topology pair is supported.
