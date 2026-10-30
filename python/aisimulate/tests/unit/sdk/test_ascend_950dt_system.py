@@ -23,11 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tools.perf_database.evidence_check import load_policy
 
 from aisimulate.sdk import common
 from aisimulate_core.sdk.perf_database import get_supported_databases, load_system_spec
 from aisimulate_core.sdk.system_spec import SystemSpec
+from tools.perf_database.evidence_check import load_policy
 
 pytestmark = pytest.mark.unit
 
