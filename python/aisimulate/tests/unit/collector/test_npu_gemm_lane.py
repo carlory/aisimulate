@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 MODULE = "collector.vllm.collect_gemm_npu"
 
 # Resolved from quay.io and cross-checked against the m.daocloud.io mirror on
-# 2026-10-29 (notes/ascend-950dt/device-visit-1.md).
+# 2026-10-29.
 IMAGE = (
     "quay.io/ascend/vllm-ascend:v0.30.0rc2-a5-openeuler"
     "@sha256:2fb630483fee3ee74c882ad490e2f2586e683a507b8365306f8d25e4df3e33ea"
@@ -63,8 +63,8 @@ def test_manifest_pins_the_vllm_ascend_runtime_identity():
 
 def test_manifest_records_the_image_abi_read_from_the_image_layers():
     """The A5 image's daily-deps step overrides requirements.txt and the
-    published versioning-policy matrix; abi: must describe what is installed
-    (notes/ascend-950dt/assist-backlog.md B7)."""
+    published versioning-policy matrix; abi: must describe what is
+    installed."""
     abi = get_collector_runtime("vllm_npu").abi
 
     assert abi["cann"] == "9.2.0_20260930220649"

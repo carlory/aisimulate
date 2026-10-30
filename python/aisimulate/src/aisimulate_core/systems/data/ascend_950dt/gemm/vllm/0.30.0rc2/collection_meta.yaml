@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# SYNTHETIC M4 STAGING DATA -- NOT A MEASUREMENT. See ../README.md and
-# notes/ascend-950dt/m4-blockers.md (D1, D2).
+# SYNTHETIC M4 STAGING DATA -- NOT A MEASUREMENT. See ../README.md.
 #
 # Deliberately a status-only schema-v1 sidecar: collector_ref / collector_hash
 # / case_plan_hash / collected_at attest a real campaign on a real device, and

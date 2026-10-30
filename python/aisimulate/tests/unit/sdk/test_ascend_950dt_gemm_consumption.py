@@ -108,8 +108,7 @@ class TestSupportMatrixCoverage:
     def test_the_generator_enumerates_an_ascend_gemm_cell(self) -> None:
         """The support-matrix generators iterate discovered databases, so the
         staged table is what makes ascend_950dt rows appear at the next
-        regeneration (the committed CSVs are a CI-produced fleet artifact —
-        see notes/ascend-950dt/m4-blockers.md B1)."""
+        regeneration (the committed CSVs are a CI-produced fleet artifact)."""
         combinations = SupportMatrix().generate_combinations()
         cells = {(system, backend, version) for _model, system, backend, version in combinations}
         assert (SYSTEM, BACKEND, VERSION) in cells

@@ -273,13 +273,13 @@ frameworks:
         # Ascend 950DT node g-master1 runs its linux/arm64 child
         # sha256:555ffa772734e39e4277d0c243d7dc3600e9f6ed3ac2c03eae4b3ad331661875.
         # Resolved from quay.io and cross-checked against the m.daocloud.io
-        # mirror on 2026-10-29 (notes/ascend-950dt/device-visit-1.md).
+        # mirror on 2026-10-29.
         default: "quay.io/ascend/vllm-ascend:v0.30.0rc2-a5-openeuler@sha256:2fb630483fee3ee74c882ad490e2f2586e683a507b8365306f8d25e4df3e33ea"
       # Split provenance: torch/torch_npu/triton_ascend/triton are read from the
-      # image layers' dist-info (authoritative, notes/ascend-950dt/assist-backlog.md
-      # B7 -- the A5 image's last build step runs install_daily_deps.sh, which
-      # overrides requirements.txt, so neither the vllm-ascend versioning-policy
-      # matrix nor the Dockerfile ARGs describe what is installed).
+      # image layers' dist-info (authoritative -- the A5 image's last build
+      # step runs install_daily_deps.sh, which overrides requirements.txt, so
+      # neither the vllm-ascend versioning-policy matrix nor the Dockerfile
+      # ARGs describe what is installed).
       # cann/vllm/soc_version come from the Dockerfile ARG/ENV and still need an
       # in-container `pip show` / version.cfg confirmation on the node (A1/A3).
       abi:

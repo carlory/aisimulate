@@ -9,10 +9,10 @@ Covers the three hand-authored registration surfaces introduced with
 ``collector/evidence_policy.yaml`` — plus the no-regression contract for the
 systems that already shipped.
 
-The YAML's numeric content traces to
-``docs/perf-model/collector/ascend-950dt-support.md`` ("Verified facts"):
-official per-chip figures (4TB/s HBM bandwidth, 1 PFLOPS FP8, 2TB/s
-interconnect) and the on-device observation of the 96GiB capacity tier with
+The YAML's numeric content traces to the Ascend 950
+architecture white paper and on-device observation: official per-chip
+figures (4TB/s HBM bandwidth, 1 PFLOPS FP8, 2TB/s
+interconnect) and the observed 96GiB capacity tier with
 8 chips per node. The unofficial/placeholder entries are deliberately NOT
 pinned here — M5 replaces them with measurements — but they must stay
 positive so the strict ``*_tc_flops`` resolver can run.

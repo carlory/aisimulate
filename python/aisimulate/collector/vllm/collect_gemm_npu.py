@@ -5,8 +5,7 @@
 
 The NPU counterpart to the XPU vLLM GEMM collector: it builds
 RowParallelLinear layers, expands YAML-backed matrix shapes and logs perf
-rows through the device-agnostic helpers. MVP scope (see
-docs/perf-model/collector/ascend-950dt-support.md): bf16 only, eager only,
+rows through the device-agnostic helpers. MVP scope: bf16 only, eager only,
 no power sampling.
 
 The pinned version is the vllm-ascend release, not base vLLM: vllm-ascend
