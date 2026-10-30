@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
 from collector.case_generator import get_gemm_case_specs, get_gemm_type_specs
 from collector.framework_manifest import (
     get_collector_runtime,
