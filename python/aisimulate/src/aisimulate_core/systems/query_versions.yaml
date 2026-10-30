@@ -36,20 +36,21 @@ defaults:
 overrides:
   ascend_950dt:
     # The vllm_npu lane's version axis is the vllm-ascend release, so the
-    # fleet default (0.24.0, a base-vLLM version this system holds no data
-    # for) cannot apply: without an override the slot resolver advertises
-    # 0.24.0 as current and every enumerated-slot consumer fails to load it.
+    # fleet defaults (current: 0.30.0, previous: 0.24.0 — base-vLLM versions
+    # this system holds no data for) and the fleet-derived `next` (currently
+    # 0.31.0 from the NVIDIA GLM-5.3-Flash drop) cannot apply: without an
+    # override the slot resolver advertises 0.30.0 / 0.24.0 / 0.31.0 on
+    # ascend_950dt and every enumerated-slot consumer fails to load them.
     # 0.30.0rc2 currently holds M4 *synthetic staging* gemm rows
     # (data/ascend_950dt/gemm/vllm/README.md); M5 replaces the rows in place,
     # so this pin stays correct across that change.
     #
-    # DO NOT REMOVE AFTER M5. The pin is load-bearing twice over: override
-    # systems are excluded from the fleet `next` derivation, so it is also the
-    # only thing keeping the vllm-ascend release string out of the derived
-    # `next` vLLM slot of every NVIDIA system (without it, b200_sxm, b300_sxm,
-    # gb200, gb300, h100_sxm, h200_sxm, l40s and rtx_pro_6000_server advertise
-    # 0.30.0rc2 as their next vLLM version). Pinned by
-    # tests/unit/sdk/test_ascend_950dt_gemm_consumption.py.
+    # DO NOT REMOVE AFTER M5. The pin is load-bearing in both directions:
+    # override systems expose no `next` (keeping the fleet-derived 0.31.0 out
+    # of ascend_950dt's slots) and are excluded from the fleet `next`
+    # derivation (keeping future vllm-ascend release strings that sort above
+    # fleet current out of the derived `next` vLLM slot of every NVIDIA
+    # system). Pinned by tests/unit/sdk/test_ascend_950dt_gemm_consumption.py.
     vllm: {current: "0.30.0rc2", previous: null}
   a100_sxm:
     trtllm: {current: "1.0.0", previous: null}

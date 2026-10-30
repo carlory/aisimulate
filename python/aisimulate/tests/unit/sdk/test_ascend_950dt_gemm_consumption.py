@@ -82,14 +82,17 @@ class TestBackendResolution:
 
 
 class TestVersionSlotContainment:
-    """Review 003 F1: the `ascend_950dt` override in `query_versions.yaml` is
-    load-bearing for the *rest of the fleet* too. Override systems are excluded
-    from the fleet `next` derivation, so removing the pin would re-advertise
-    the vllm-ascend release string as the derived next vLLM slot of every
-    NVIDIA system."""
+    """Reviews 003 F1 / 004 E2: the `ascend_950dt` override in
+    `query_versions.yaml` isolates the vllm-ascend version axis in both
+    directions. Override systems expose no `next` — blocking the fleet-derived
+    `next` (`0.31.0`) and the fleet base-vLLM defaults (`0.30.0` / `0.24.0`)
+    from entering `ascend_950dt`'s slots — and are excluded from `_derive_fleet_next`,
+    keeping vllm-ascend release strings out of the NVIDIA fleet's slots."""
 
     def test_ascend_is_pinned_to_the_vllm_ascend_release(self) -> None:
-        assert get_version_slots(SYSTEM, BACKEND) == {"current": VERSION}
+        slots = get_version_slots(SYSTEM, BACKEND)
+        assert slots == {"current": VERSION}
+        assert "0.31.0" not in slots.values()
 
     @pytest.mark.parametrize(
         "nvidia_system",
