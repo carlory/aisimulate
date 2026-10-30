@@ -11,7 +11,7 @@
 
 data_dir: data/ascend_950dt # relative to systems_dir
 gpu:
-  vendor: ascend # nvidia | intel | ascend, explicit device-kind discrimination for non-CUDA systems
+  vendor: ascend # nvidia | intel | ascend, explicit device-kind identification for non-CUDA systems
   mem_bw: 4000000000000 # 4TB/s official (white paper table 3-1; the same value on both capacity tiers), cross-checked by the visit-2 HBM 4000MHz estimate
   mem_bw_empirical_scaling_factor: 1.0 # TODO M5 no effective-BW measurement on CANN yet, modify based on your own observations
   mem_empirical_constant_latency: 0.0 # TODO M5 no kernel-launch/latency measurement on CANN yet
