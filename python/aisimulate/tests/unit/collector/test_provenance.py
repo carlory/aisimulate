@@ -240,7 +240,7 @@ def test_collector_hash_missing_closure_file_raises(tmp_path):
         "collector.vllm.collect_gemm_npu",
     ],
 )
-def test_real_xpu_registry_modules_are_hashable(module):
+def test_real_device_lane_registry_modules_are_hashable(module):
     closures = provenance.load_closures(HASH_CLOSURES_PATH)
     assert provenance.collector_hash(module, REPO_ROOT, closures).startswith("sha256:")
 

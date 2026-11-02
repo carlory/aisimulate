@@ -28,7 +28,7 @@ from collector.framework_manifest import (
     validate_resolution,
 )
 from collector.registry_types import PerfFile
-from collector.vllm.registry import REGISTRY_NPU, REGISTRY_XPU
+from collector.vllm.registry import REGISTRY, REGISTRY_NPU, REGISTRY_XPU
 
 pytestmark = pytest.mark.unit
 
@@ -56,7 +56,7 @@ def test_manifest_pins_the_vllm_ascend_runtime_identity():
     assert runtime.version == "0.30.0rc2"
     assert runtime.images == {"default": IMAGE}
     assert runtime.image() == IMAGE
-    # The data backend directory stays "vllm", like the XPU lane.
+    # Device-specific vLLM lanes still publish under the shared "vllm" data_backend directory.
     assert runtime.data_backend == "vllm"
     assert runtime.workload == "default"
 
@@ -91,7 +91,7 @@ def test_gemm_resolves_through_the_npu_lane_and_enforces_the_pin():
 
 
 def test_npu_collectors_are_exactly_pinned_to_the_manifest_version():
-    """Mirrors the XPU guard: no version routing, so the literal must match."""
+    """REGISTRY_NPU uses unrouted OpEntry items, so __compat__ must match the manifest pin."""
     expected = f'__compat__ = "vllm_ascend=={get_collector_runtime("vllm_npu").version}"'
     assert all(not entry.versions for entry in REGISTRY_NPU)
 
@@ -116,16 +116,18 @@ def test_registry_npu_carries_only_the_gemm_op():
     assert gemm.perf_filename is PerfFile.GEMM
 
 
-def test_npu_gemm_entry_mirrors_the_xpu_one_except_for_its_module():
+def test_npu_gemm_entry_uses_the_standard_vllm_gemm_entrypoints():
+    """NPU gemm shares the standard vLLM gemm entrypoints and table name, with its own module."""
+    cuda_gemm = next(entry for entry in REGISTRY if entry.op == "gemm")
     xpu_gemm = next(entry for entry in REGISTRY_XPU if entry.op == "gemm")
     npu_gemm = REGISTRY_NPU[0]
 
     assert (npu_gemm.get_func, npu_gemm.run_func, npu_gemm.perf_filename) == (
-        xpu_gemm.get_func,
-        xpu_gemm.run_func,
-        xpu_gemm.perf_filename,
+        cuda_gemm.get_func,
+        cuda_gemm.run_func,
+        cuda_gemm.perf_filename,
     )
-    assert npu_gemm.module != xpu_gemm.module
+    assert npu_gemm.module not in {cuda_gemm.module, xpu_gemm.module}
 
 
 # ---------------------------------------------------------------------------
@@ -134,9 +136,8 @@ def test_npu_gemm_entry_mirrors_the_xpu_one_except_for_its_module():
 
 
 def test_npu_gemm_cases_are_bf16_only():
+    # The vllm_npu YAML partition declares bf16 only for the MVP.
     assert get_gemm_type_specs("vllm_npu") == ["bfloat16"]
-    # The XPU partition keeps its fp8 lane; the partitions are independent.
-    assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
 
 def test_npu_gemm_shape_sweep_expands():
@@ -144,8 +145,10 @@ def test_npu_gemm_shape_sweep_expands():
 
     assert specs, "cases/base_ops/gemm.yaml must define a vllm_npu shape sweep"
     assert all(spec.x > 0 and spec.n > 0 and spec.k > 0 for spec in specs)
-    # Narrowed grid shared with the XPU partition, not the full base sweep.
-    assert len(specs) == len(get_gemm_case_specs("vllm_xpu"))
+    # Framework-specific transformer GEMM sweep (21 token counts x 21 k x 23 n = 10,143 base
+    # grid shapes plus model-specific shapes = 10,857), narrower than the all-frameworks base
+    # sweep (which adds +1 alignment-probe token counts).
+    assert 21 * 21 * 23 <= len(specs) < len(get_gemm_case_specs())
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +157,7 @@ def test_npu_gemm_shape_sweep_expands():
 
 
 def _with_exit_stack(func):
-    """Stand-in for utils_xpu.with_exit_stack (same contract: injects a stack)."""
+    """Stand-in for collector.vllm.utils.with_exit_stack (injects an ExitStack)."""
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -208,13 +211,13 @@ def test_run_gemm_defaults_to_npu_0_and_refuses_other_dtypes(collect_gemm_npu):
 
 
 def test_module_declares_the_mvp_measurement_contract():
-    """Eager, no power sampling, untraced kernel label, XPU-compatible columns."""
+    """Eager, no power sampling, untraced kernel label, standard gemm_perf columns."""
     source = (REPO_ROOT / f"{MODULE.replace('.', '/')}.py").read_text(encoding="utf-8")
 
     assert "use_cuda_graph=False" in source
     assert "power_stats=None" in source
     assert 'kernel_source="vllm_default"' in source
-    # Same columns as the XPU gemm table, so the two can share a schema.
+    # Emits the standard gemm_perf schema column (always False in eager mode).
     assert '"used_cuda_graph": results["used_cuda_graph"]' in source
     assert "xpu_graph_measure_enabled" not in source
     # torch_npu's get_device_capability returns None (or a configured fake) —

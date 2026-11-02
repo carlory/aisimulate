@@ -7,7 +7,7 @@
 # capacity tiers, 547 TFLOPS BF16/FP16 and 1 PFLOPS FP8 on the top 36-Cube-Core tier,
 # 2016 GB/s bidirectional UB IO. INT8/FP32 peaks stay unpublished; the TODO entries below
 # are placeholders to replace with on-device campaign measurements, not measurements.
-# Like b60, this is a non-CUDA device and carries no sm_version.
+# As a non-CUDA device, this system declares gpu.vendor explicitly and carries no sm_version.
 
 data_dir: data/ascend_950dt # relative to systems_dir
 gpu:
@@ -25,7 +25,7 @@ gpu:
 node:
   num_gpus_per_node: 8 # 8x Ascend950DT per node (observed on the device node, npu-smi info -t topo 2026-10-29)
   inter_node_bw: 50000000000  # TODO: on-device campaign — Byte/s per NPU, single direction, conservative 400Gb/s placeholder, scale-out NICs unverified
-  # Byte/s per NPU, single direction -- the unit every other spec here uses (b60.yaml:18-19).
+  # Byte/s per NPU, single direction -- the standard unit across systems/*.yaml.
   # Official "Ascend 950 NPU Architecture White Paper" §4.6: UB IO bandwidth 2016 GB/s
   # (bidirectional, per chip) = 72 lane x 112 Gbps x 2 / 8, so the per-chip unidirectional
   # bound is ~1008 GB/s -- and that bound assumes all 18 x4 ports serve scale-up, while the

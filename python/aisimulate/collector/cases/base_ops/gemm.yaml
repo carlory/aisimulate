@@ -121,8 +121,9 @@ framework_specific_op_cases:
     gemm:
       cases:
       - id: base_transformer_gemm_shape_sweep
-        description: 'Ascend NPU GEMM sweep for vLLM RowParallelLinear. Shares the
-          XPU-narrowed grid; bf16 only for the MVP (vllm-ascend has a W8A8FP8
+        description: 'Ascend NPU GEMM sweep for vLLM RowParallelLinear covering
+          transformer hidden, intermediate, and vocab-scale dimensions; bf16
+          only for the MVP (vllm-ascend has a W8A8FP8
           lane for Ascend 950, collected once bf16 is validated on device).
 
           '
@@ -170,7 +171,6 @@ framework_specific_op_cases:
         - 12288
         # k = inter_size/tp or attn_dim/tp; 12288 left llama3-8B tp1 (14336) and
         # every 70B+ inter extrapolating. 32768 covers the roster down to tp2.
-        # Mirrored from the vllm_xpu partition (upstream 2026-10 campaign grid).
         - 16384
         - 32768
         # Extend the output (n) axis to vocab scale for LM-head coverage

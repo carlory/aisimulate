@@ -3,7 +3,7 @@
 
 """vLLM GEMM collector for Huawei Ascend NPU devices (vllm-ascend).
 
-The NPU counterpart to the XPU vLLM GEMM collector: it builds
+The NPU counterpart to the CUDA vLLM GEMM collector: it builds
 RowParallelLinear layers, expands YAML-backed matrix shapes and logs perf
 rows through the device-agnostic helpers. MVP scope: bf16 only, eager only,
 no power sampling.
@@ -179,9 +179,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
         get_device_module(device).empty_cache()
 
     # torch_npu 2.10.0.post7 API notes (read from the pinned image's own
-    # wheel): get_device_name validates the ordinal but returns the global SoC
-    # name (no per-card distinction) — fine for this informational column,
-    # same behavior as the XPU lane.
+    # wheel): get_device_name validates the ordinal and returns the SoC model
+    # name (no per-card distinction), which matches what this informational
+    # column records.
     # get_device_capability is never called: it returns None unless
     # TORCH_NPU_DEVICE_CAPABILITY is set, and then a configured fake value.
     log_perf(
@@ -192,7 +192,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
                 "n": n,
                 "k": k,
                 "latency": results["latency_ms"] / outside_loop_count,
-                # Same columns as the XPU gemm table; always False while the
+                # Shared vLLM gemm_perf schema column; always False while the
                 # lane is eager-only.
                 "used_cuda_graph": results["used_cuda_graph"],
             }
@@ -201,9 +201,8 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
         version=vllm_ascend_version,
         device_name=get_device_module(device).get_device_name(device),
         op_name="gemm",
-        # The vllm-ascend dispatch for an unquantized linear is not traced yet
-        # (same posture as the XPU lane); op_backend_facts.yaml records the
-        # slice as backend "unverified".
+        # The vllm-ascend dispatch for an unquantized linear is not traced yet;
+        # op_backend_facts.yaml records the slice as backend "unverified".
         kernel_source="vllm_default",
         perf_filename=perf_filename,
         # No NVML-equivalent on CANN: power is never sampled on this lane.
