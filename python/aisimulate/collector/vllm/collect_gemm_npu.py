@@ -27,7 +27,8 @@ from collector.helper import benchmark_with_power, get_device_module, log_perf
 # backend comes from vLLM's own platform plugin (HCCL under vllm-ascend).
 # The XPU fork (utils_xpu) stays off-limits to non-XPU collectors
 # (tests/unit/collector/test_vllm_xpu_utils.py), and its env://+port rendezvous
-# is the shape the precedent survey recommends avoiding for this lane.
+# is prone to port conflicts in multi-worker runs; the stock FileStore
+# rendezvous is the robust default here.
 # TODO: on-device campaign — confirm that the single-rank init selects the HCCL PG.
 from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 from vllm.config import set_current_vllm_config
