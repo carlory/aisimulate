@@ -110,7 +110,11 @@ def test_npu_host_selects_the_npu_lane(monkeypatch):
     assert observed["provenance_ctx"]["collector_framework"] == "vllm_npu"
     # The lane's version axis is vllm-ascend, not base vLLM (0.28.0 here).
     assert observed["installed_version"] == "0.30.0rc2"
-    assert [collection["module"] for collection in observed["collections"]] == ["collector.vllm.collect_gemm_npu"]
+    assert [collection["module"] for collection in observed["collections"]] == [
+        "collector.vllm.collect_gemm_npu",
+        "collector.vllm.collect_attn_npu",
+        "collector.vllm.collect_attn_npu",
+    ]
 
 
 def test_npu_lane_refuses_to_run_without_vllm_ascend(monkeypatch):

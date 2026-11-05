@@ -219,10 +219,10 @@ REGISTRY_XPU: list[OpEntry] = [
     ),
 ]
 
-# Ascend NPU (vllm-ascend) lane. MVP scope is gemm in bf16 eager mode; the
-# `vllm_npu` manifest pin resolves these entries, and both must stay in sync
-# (an op entry without its pin is unresolvable, a pin without ops fails
-# `validate_resolution`).
+# Ascend NPU (vllm-ascend) lane. MVP scope is gemm and dense attention
+# (context/generation) in bf16 eager mode; the `vllm_npu` manifest pin resolves
+# these entries, and both must stay in sync (an op entry without its pin is
+# unresolvable, a pin without ops fails `validate_resolution`).
 REGISTRY_NPU: list[OpEntry] = [
     OpEntry(
         op="gemm",
@@ -232,6 +232,24 @@ REGISTRY_NPU: list[OpEntry] = [
         perf_filename=PerfFile.GEMM,
         # Untraced vllm-ascend linear dispatch (`kernel_source="vllm_default"`
         # is only an intended label) and not yet hardware-validated on Ascend.
+        unverified=True,
+    ),
+    OpEntry(
+        op="attention_context",
+        module="collector.vllm.collect_attn_npu",
+        get_func="get_context_attention_test_cases",
+        run_func="run_attention_torch",
+        perf_filename=PerfFile.CONTEXT_ATTENTION,
+        # Not yet hardware-validated on Ascend 950DT.
+        unverified=True,
+    ),
+    OpEntry(
+        op="attention_generation",
+        module="collector.vllm.collect_attn_npu",
+        get_func="get_generation_attention_test_cases",
+        run_func="run_attention_torch",
+        perf_filename=PerfFile.GENERATION_ATTENTION,
+        # Not yet hardware-validated on Ascend 950DT.
         unverified=True,
     ),
 ]

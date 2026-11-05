@@ -81,6 +81,69 @@ all_frameworks_op_cases:
         fp8_kv_cache: true
         fp8_context_fmha: true
 framework_specific_op_cases:
+  vllm_npu:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        sequence_lengths:
+        - 1
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 1024
+        - 1536
+        - 2048
+        - 3072
+        - 4096
+        - 6144
+        - 8192
+        - 10240
+        - 12288
+        - 16384
+        query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        kv_head_options:
+        - 1
+        - 2
+        - 4
+        - 8
+        head_dims:
+        - 128
+        - 64
+        window_sizes:
+        - 0
+        - 128
+        head_profiles:
+        - id: default_head64
+          head_dim: 64
+          window_sizes: [0]
+          query_head_counts: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+          kv_head_options: [1, 2, 4, 8]
+        - id: default_head128
+          head_dim: 128
+          window_size: 0
+          query_head_counts: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+          kv_head_options: [1, 2, 4, 8]
   vllm_xpu:
     attention_context:
       cases:
