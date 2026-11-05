@@ -312,6 +312,9 @@ def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_
         linear_calls.append(kwargs)
         layer = MagicMock(name="fp8_gemm_layer")
         layer.weight = MagicMock(name="weight")
+        layer.weight.shape = (32, 64)
+        layer.weight.dtype = collect_gemm_npu.torch.float8_e4m3fn
+        layer.weight.device = "npu:0"
         layer.weight_scale = MagicMock(name="weight_scale")
         layer.weight_offset = MagicMock(name="weight_offset")
         layer.quant_method.process_weights_after_loading.side_effect = processed_layers.append
@@ -343,9 +346,17 @@ def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_
     )
     assert len(processed_layers) == len(linear_calls)
     for layer in processed_layers:
-        layer.weight.fill_.assert_called_once_with(0.01)
+        layer.weight.fill_.assert_not_called()
+        layer.weight.copy_.assert_called_once_with(collect_gemm_npu.torch.full.return_value.to.return_value)
         layer.weight_scale.fill_.assert_called_once_with(1.0)
         layer.weight_offset.zero_.assert_called_once_with()
+    collect_gemm_npu.torch.full.assert_called_with(
+        (32, 64),
+        0.01,
+        dtype=collect_gemm_npu.torch.bfloat16,
+        device="npu:0",
+    )
+    collect_gemm_npu.torch.full.return_value.to.assert_called_with(collect_gemm_npu.torch.float8_e4m3fn)
     assert logged["framework"] == "VLLM"
     assert logged["version"] == "0.30.0rc2"
     assert logged["device_name"] == "Ascend950DT"

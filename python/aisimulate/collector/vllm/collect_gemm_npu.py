@@ -152,7 +152,16 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
 
         if gemm_type == "fp8" and hasattr(gemm, "weight"):
             with torch.no_grad():
-                gemm.weight.fill_(0.01)
+                # CANN aclnnInplaceFillScalar rejects DT_FLOAT8_E4M3FN, so fill
+                # a BF16 tensor first and copy the converted FP8 values in.
+                gemm.weight.copy_(
+                    torch.full(
+                        gemm.weight.shape,
+                        0.01,
+                        dtype=dtype,
+                        device=gemm.weight.device,
+                    ).to(gemm.weight.dtype)
+                )
                 if hasattr(gemm, "weight_scale"):
                     gemm.weight_scale.fill_(1.0)
                 if hasattr(gemm, "weight_offset"):
