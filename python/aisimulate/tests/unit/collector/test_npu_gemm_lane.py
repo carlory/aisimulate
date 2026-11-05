@@ -104,10 +104,8 @@ def test_npu_collectors_are_exactly_pinned_to_the_manifest_version():
 # ---------------------------------------------------------------------------
 
 
-def test_registry_npu_carries_only_the_gemm_op():
-    assert [entry.op for entry in REGISTRY_NPU] == ["gemm"]
-
-    gemm = REGISTRY_NPU[0]
+def test_registry_npu_carries_the_gemm_op():
+    gemm = next(entry for entry in REGISTRY_NPU if entry.op == "gemm")
     assert gemm.module == MODULE
     assert (gemm.get_func, gemm.run_func) == ("get_gemm_test_cases", "run_gemm")
     # Reuses the shared table name: the NPU lane adds no new perf file.
@@ -120,7 +118,7 @@ def test_npu_gemm_entry_uses_the_standard_vllm_gemm_entrypoints():
     """NPU gemm shares the standard vLLM gemm entrypoints and table name, with its own module."""
     cuda_gemm = next(entry for entry in REGISTRY if entry.op == "gemm")
     xpu_gemm = next(entry for entry in REGISTRY_XPU if entry.op == "gemm")
-    npu_gemm = REGISTRY_NPU[0]
+    npu_gemm = next(entry for entry in REGISTRY_NPU if entry.op == "gemm")
 
     assert (npu_gemm.get_func, npu_gemm.run_func, npu_gemm.perf_filename) == (
         cuda_gemm.get_func,

@@ -219,8 +219,8 @@ REGISTRY_XPU: list[OpEntry] = [
     ),
 ]
 
-# Ascend NPU (vllm-ascend) lane. MVP scope is gemm in bf16 eager mode; the
-# `vllm_npu` manifest pin resolves these entries, and both must stay in sync
+# Ascend NPU (vllm-ascend) lane. MVP scope is gemm and moe in bf16 eager mode;
+# the `vllm_npu` manifest pin resolves these entries, and both must stay in sync
 # (an op entry without its pin is unresolvable, a pin without ops fails
 # `validate_resolution`).
 REGISTRY_NPU: list[OpEntry] = [
@@ -232,6 +232,15 @@ REGISTRY_NPU: list[OpEntry] = [
         perf_filename=PerfFile.GEMM,
         # Untraced vllm-ascend linear dispatch (`kernel_source="vllm_default"`
         # is only an intended label) and not yet hardware-validated on Ascend.
+        unverified=True,
+    ),
+    OpEntry(
+        op="moe",
+        module="collector.vllm.collect_moe_npu",
+        get_func="get_moe_test_cases",
+        run_func="run_moe_torch",
+        perf_filename=PerfFile.MOE,
+        # Single-rank BF16 FusedMoE path not yet hardware-validated on Ascend 950DT.
         unverified=True,
     ),
 ]

@@ -380,6 +380,7 @@ def _backend_registry_ops(backend: str) -> set[str] | None:
         return None
     ops = {entry.op for entry in getattr(registry, "REGISTRY", [])}
     ops.update(entry.op for entry in getattr(registry, "REGISTRY_XPU", []))
+    ops.update(entry.op for entry in getattr(registry, "REGISTRY_NPU", []))
     try:
         wideep_registry = importlib.import_module(f"collector.wideep.{backend}.registry")
     except ImportError:
