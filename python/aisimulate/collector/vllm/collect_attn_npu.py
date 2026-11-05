@@ -45,6 +45,7 @@ from collector.vllm.utils import (
     create_vllm_config,
     framework_kv_block_size,
     get_attention_backend,
+    setup_distributed,
     with_exit_stack,
 )
 from vllm.config import set_current_vllm_config
@@ -318,6 +319,8 @@ def run_attention_torch(
         # ValueError on quantized KV cache without static C8 quantized weights
         # (vllm_ascend/attention/attention_v1.py:345-351 @ v0.30.0rc2).
         raise RuntimeError("vllm_npu attention collects bfloat16 kv_cache_dtype only, got fp8")
+
+    setup_distributed(device)
 
     dev_mod = get_device_module(device)
     dev_mod.set_device(device)

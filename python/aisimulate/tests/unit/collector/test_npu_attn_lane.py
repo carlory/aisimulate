@@ -393,6 +393,11 @@ def test_run_attention_torch_logs_eager_row_and_passes_ascend_impl_contract(
         kwargs["kernel_func"]()
         yield {"latency_ms": 2.5, "used_cuda_graph": False}
 
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "setup_distributed",
+        lambda device: observed.setdefault("setup_distributed_device", device),
+    )
     monkeypatch.setattr(collect_attn_npu, "get_device_module", lambda device=None: device_module)
     monkeypatch.setattr(collect_attn_npu, "_select_attn_backend_cls", lambda **_kw: FakeBackend)
     monkeypatch.setattr(collect_attn_npu, "framework_kv_block_size", lambda _cls: 128)
@@ -416,6 +421,7 @@ def test_run_attention_torch_logs_eager_row_and_passes_ascend_impl_contract(
         perf_filename=perf_file,
     )
 
+    assert observed["setup_distributed_device"] == "npu:0"
     assert observed["batch_spec"].seq_lens == [expected_seq_len, expected_seq_len]
     assert observed["block_size"] == 128
     assert observed["impl_kwargs"]["num_heads"] == 8
