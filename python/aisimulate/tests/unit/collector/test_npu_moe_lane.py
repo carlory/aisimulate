@@ -13,9 +13,11 @@ import importlib
 import importlib.metadata
 import inspect
 import sys
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -253,7 +255,7 @@ def test_get_moe_test_cases_produces_unique_bf16_consumer_keys(collect_moe_npu, 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     cases = collect_moe_npu.get_moe_test_cases()
-    assert cases
+    assert len(cases) == 96
     assert {case[0] for case in cases} == {"bfloat16"}
     assert all(not (case[6] > 1 and case[7] > 1) for case in cases)
     assert all(case[9] == "power_law" for case in cases)
@@ -520,3 +522,589 @@ def test_run_moe_torch_executes_single_rank_allgather_path_and_logs_standard_moe
             }
         ]
     device_module.get_device_capability.assert_not_called()
+
+
+def _install_fake_vllm_ascend_modules(monkeypatch):
+    """Install fake vllm_ascend modules with EPLB and MoECommMethod registries."""
+    fake_extra_ctx = SimpleNamespace(
+        moe_comm_type="PRE_EXISTING_TYPE",
+        moe_comm_method="PRE_EXISTING_METHOD",
+        in_profile_run=True,
+        use_mega_moe=True,
+    )
+    fake_comm_type = SimpleNamespace(ALLGATHER="ALLGATHER")
+
+    class FakeCommImpl:
+        def __init__(self, moe_config):
+            self.moe_config = moe_config
+
+    ascend_fwd_mod = MagicMock(_EXTRA_CTX=fake_extra_ctx, MoECommType=fake_comm_type)
+    comm_mod = MagicMock()
+    comm_mod.AllGatherCommImpl.side_effect = FakeCommImpl
+    comm_mod._MoECommMethods = {}
+    comm_mod._moe_config_key.side_effect = lambda comm_type, cfg: (comm_type, id(cfg))
+    comm_mod.get_moe_comm_method.side_effect = lambda comm_type, cfg: comm_mod._MoECommMethods.get((comm_type, id(cfg)))
+
+    def orig_setup_moe_comm_method(_moe_config):
+        raise AssertionError("unpatched setup_moe_comm_method should not run")
+
+    def orig_get_mc2_group():
+        raise AssertionError("unpatched get_mc2_group should not run")
+
+    comm_mod.setup_moe_comm_method = orig_setup_moe_comm_method
+    ascend_fused_moe_mod = MagicMock()
+    ascend_fused_moe_mod.setup_moe_comm_method = orig_setup_moe_comm_method
+    ascend_fused_moe_mod.get_mc2_group = orig_get_mc2_group
+
+    class FakeVllmEplbAdaptor:
+        _registered_moe_layers: ClassVar[list] = []
+
+        @staticmethod
+        def register_layer(layer):
+            FakeVllmEplbAdaptor._registered_moe_layers.append(layer)
+
+    class FakeAscendRoutedExperts:
+        moe_counter = -1
+
+    vllm_adaptor_mod = SimpleNamespace(VllmEplbAdaptor=FakeVllmEplbAdaptor)
+    routed_experts_mod = SimpleNamespace(AscendRoutedExperts=FakeAscendRoutedExperts)
+
+    vllm_ascend_pkg = MagicMock()
+    vllm_ascend_ops_pkg = MagicMock()
+    vllm_ascend_fused_moe_pkg = MagicMock()
+    vllm_ascend_eplb_pkg = MagicMock()
+    vllm_ascend_eplb_adaptor_pkg = MagicMock()
+    vllm_ascend_pkg.ops = vllm_ascend_ops_pkg
+    vllm_ascend_ops_pkg.fused_moe = vllm_ascend_fused_moe_pkg
+    vllm_ascend_fused_moe_pkg.fused_moe = ascend_fused_moe_mod
+    vllm_ascend_fused_moe_pkg.moe_comm_method = comm_mod
+    vllm_ascend_fused_moe_pkg.routed_experts = routed_experts_mod
+    vllm_ascend_pkg.eplb = vllm_ascend_eplb_pkg
+    vllm_ascend_eplb_pkg.adaptor = vllm_ascend_eplb_adaptor_pkg
+    vllm_ascend_eplb_adaptor_pkg.vllm_adaptor = vllm_adaptor_mod
+
+    for mod_name, mod_obj in (
+        ("vllm_ascend", vllm_ascend_pkg),
+        ("vllm_ascend.ops", vllm_ascend_ops_pkg),
+        ("vllm_ascend.ops.fused_moe", vllm_ascend_fused_moe_pkg),
+        ("vllm_ascend.ops.fused_moe.fused_moe", ascend_fused_moe_mod),
+        ("vllm_ascend.ops.fused_moe.moe_comm_method", comm_mod),
+        ("vllm_ascend.ops.fused_moe.routed_experts", routed_experts_mod),
+        ("vllm_ascend.eplb", vllm_ascend_eplb_pkg),
+        ("vllm_ascend.eplb.adaptor", vllm_ascend_eplb_adaptor_pkg),
+        ("vllm_ascend.eplb.adaptor.vllm_adaptor", vllm_adaptor_mod),
+        ("vllm_ascend.ascend_config", MagicMock()),
+        ("vllm_ascend.ascend_forward_context", ascend_fwd_mod),
+        ("vllm_ascend.utils", MagicMock()),
+    ):
+        monkeypatch.setitem(sys.modules, mod_name, mod_obj)
+
+    return SimpleNamespace(
+        extra_ctx=fake_extra_ctx,
+        comm_mod=comm_mod,
+        ascend_fused_moe_mod=ascend_fused_moe_mod,
+        orig_setup_moe_comm_method=orig_setup_moe_comm_method,
+        orig_get_mc2_group=orig_get_mc2_group,
+        vllm_eplb_adaptor=FakeVllmEplbAdaptor,
+        ascend_routed_experts_cls=FakeAscendRoutedExperts,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "hidden_size", "inter_size", "topk", "num_experts", "expected_kwargs"),
+    [
+        (
+            "Qwen/Qwen3-30B-A3B",
+            2048,
+            768,
+            8,
+            128,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "softmax",
+                "routed_scaling_factor": 1.0,
+                "swiglu_limit": None,
+                "use_grouped_topk": False,
+                "num_expert_group": None,
+                "topk_group": None,
+                "apply_routed_scale_to_output": False,
+                "router_logits_dtype": None,
+                "has_routing_bias": False,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+        (
+            "Qwen/Qwen3-235B-A22B",
+            4096,
+            1536,
+            8,
+            128,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "softmax",
+                "routed_scaling_factor": 1.0,
+                "swiglu_limit": None,
+                "use_grouped_topk": False,
+                "num_expert_group": None,
+                "topk_group": None,
+                "apply_routed_scale_to_output": False,
+                "router_logits_dtype": None,
+                "has_routing_bias": False,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+        (
+            "Qwen/Qwen3.5-35B-A3B",
+            2048,
+            512,
+            8,
+            256,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "softmax",
+                "routed_scaling_factor": 1.0,
+                "swiglu_limit": None,
+                "use_grouped_topk": False,
+                "num_expert_group": None,
+                "topk_group": None,
+                "apply_routed_scale_to_output": False,
+                "router_logits_dtype": None,
+                "has_routing_bias": False,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+        (
+            "Qwen/Qwen3.5-122B-A10B",
+            3072,
+            1024,
+            8,
+            256,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "softmax",
+                "routed_scaling_factor": 1.0,
+                "swiglu_limit": None,
+                "use_grouped_topk": False,
+                "num_expert_group": None,
+                "topk_group": None,
+                "apply_routed_scale_to_output": False,
+                "router_logits_dtype": None,
+                "has_routing_bias": False,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+        (
+            "MiniMaxAI/MiniMax-M3",
+            6144,
+            3072,
+            4,
+            128,
+            {
+                "activation": "swigluoai_uninterleave",
+                "renormalize": True,
+                "scoring_func": "sigmoid",
+                "routed_scaling_factor": 2.0,
+                "swiglu_limit": 7.0,
+                "use_grouped_topk": False,
+                "num_expert_group": None,
+                "topk_group": None,
+                "apply_routed_scale_to_output": True,
+                "router_logits_dtype": "float32",
+                "has_routing_bias": True,
+                "swiglu_alpha": 1.702,
+                "swiglu_beta": 1.0,
+            },
+        ),
+        (
+            "zai-org/GLM-5",
+            6144,
+            2048,
+            8,
+            256,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "sigmoid",
+                "routed_scaling_factor": 2.5,
+                "swiglu_limit": None,
+                "use_grouped_topk": True,
+                "num_expert_group": 1,
+                "topk_group": 1,
+                "apply_routed_scale_to_output": True,
+                "router_logits_dtype": "float32",
+                "has_routing_bias": True,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+        (
+            "deepseek-ai/DeepSeek-V3",
+            7168,
+            2048,
+            8,
+            256,
+            {
+                "activation": "silu",
+                "renormalize": True,
+                "scoring_func": "sigmoid",
+                "routed_scaling_factor": 2.5,
+                "swiglu_limit": None,
+                "use_grouped_topk": True,
+                "num_expert_group": 8,
+                "topk_group": 4,
+                "apply_routed_scale_to_output": True,
+                "router_logits_dtype": "float32",
+                "has_routing_bias": True,
+                "swiglu_alpha": None,
+                "swiglu_beta": None,
+            },
+        ),
+    ],
+)
+def test_run_moe_torch_passes_serving_aligned_kwargs_for_all_declared_models(
+    collect_moe_npu,
+    monkeypatch,
+    model_name,
+    hidden_size,
+    inter_size,
+    topk,
+    num_experts,
+    expected_kwargs,
+):
+    _install_fake_vllm_ascend_modules(monkeypatch)
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 96 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+
+    captured_kwargs = {}
+
+    class FakeMoERunner:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.routed_experts = SimpleNamespace(
+                named_parameters=lambda recurse=False: [],
+                quant_method=None,
+            )
+            self.moe_config = object()
+
+        def to(self, _dev):
+            return self
+
+        def eval(self):
+            pass
+
+        def requires_grad_(self, _flag):
+            pass
+
+        def __call__(self, _hidden_states, _router_logits):
+            pass
+
+    sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = FakeMoERunner
+    sys.modules["vllm.forward_context"].get_forward_context.return_value = SimpleNamespace(moe_layer_index=0)
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 5.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_moe_npu, "setup_distributed", lambda _device: None)
+    monkeypatch.setattr(collect_moe_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "power_law_logits_v3",
+        lambda num_tokens, n_exp, _topk, _ep, _alpha: _FakeTensor((num_tokens, n_exp), dtype="float32"),
+    )
+    monkeypatch.setattr(collect_moe_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_moe_npu, "log_perf", lambda **_kwargs: None)
+
+    collect_moe_npu.run_moe_torch(
+        "bfloat16",
+        [4],
+        hidden_size,
+        inter_size,
+        topk,
+        num_experts,
+        1,
+        1,
+        model_name,
+        distributed="power_law",
+        power_law_alpha=1.01,
+        perf_filename=PerfFile.MOE,
+    )
+
+    assert captured_kwargs["activation"] == expected_kwargs["activation"]
+    assert captured_kwargs["renormalize"] is expected_kwargs["renormalize"]
+    assert captured_kwargs["scoring_func"] == expected_kwargs["scoring_func"]
+    assert captured_kwargs["routed_scaling_factor"] == pytest.approx(expected_kwargs["routed_scaling_factor"])
+    assert captured_kwargs["swiglu_limit"] == expected_kwargs["swiglu_limit"]
+    assert captured_kwargs["use_grouped_topk"] is expected_kwargs["use_grouped_topk"]
+    assert captured_kwargs["num_expert_group"] == expected_kwargs["num_expert_group"]
+    assert captured_kwargs["topk_group"] == expected_kwargs["topk_group"]
+    assert captured_kwargs["apply_routed_scale_to_output"] is expected_kwargs["apply_routed_scale_to_output"]
+    assert captured_kwargs["router_logits_dtype"] == expected_kwargs["router_logits_dtype"]
+    if expected_kwargs["has_routing_bias"]:
+        assert captured_kwargs["e_score_correction_bias"] is not None
+        assert captured_kwargs["e_score_correction_bias"].shape == (num_experts,)
+        assert captured_kwargs["e_score_correction_bias"].dtype == "float32"
+    else:
+        assert captured_kwargs["e_score_correction_bias"] is None
+    assert captured_kwargs.get("swiglu_alpha") == expected_kwargs["swiglu_alpha"]
+    assert captured_kwargs.get("swiglu_beta") == expected_kwargs["swiglu_beta"]
+
+
+@pytest.mark.parametrize("failure_stage", ["none", "init", "forward"])
+def test_run_moe_torch_cleans_up_case_resources_and_preserves_preexisting_state(
+    collect_moe_npu,
+    monkeypatch,
+    failure_stage,
+):
+    env = _install_fake_vllm_ascend_modules(monkeypatch)
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 96 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+
+    # Pre-populate global state owned by an external caller before run_moe_torch.
+    preexisting_layer = object()
+    preexisting_comm = object()
+    env.vllm_eplb_adaptor._registered_moe_layers.append(preexisting_layer)
+    env.ascend_routed_experts_cls.moe_counter = 7
+    env.comm_mod._MoECommMethods[("ALLGATHER", 999)] = preexisting_comm
+
+    weak_refs = {}
+
+    class FakeRoutedExperts:
+        def __init__(self):
+            self.w13_weight = _FakeTensor((64, 1536, 2048), dtype="bfloat16")
+            self.w2_weight = _FakeTensor((64, 2048, 768), dtype="bfloat16")
+            self.quant_method = None
+            env.ascend_routed_experts_cls.moe_counter += 1
+            env.vllm_eplb_adaptor.register_layer(self)
+
+        def named_parameters(self, recurse=False):
+            return [("w13_weight", self.w13_weight), ("w2_weight", self.w2_weight)]
+
+    class FakeMoERunner:
+        def __init__(self, **_kwargs):
+            self.routed_experts = FakeRoutedExperts()
+            self.moe_config = SimpleNamespace(ep_size=2)
+            weak_refs["routed_experts"] = weakref.ref(self.routed_experts)
+            weak_refs["runner"] = weakref.ref(self)
+            comm_impl = env.ascend_fused_moe_mod.setup_moe_comm_method(self.moe_config)
+            weak_refs["comm_impl"] = weakref.ref(comm_impl)
+            # Confirm registration happened during construction.
+            assert self.routed_experts in env.vllm_eplb_adaptor._registered_moe_layers
+            if failure_stage == "init":
+                raise RuntimeError("boom during FusedMoE init after EPLB registration")
+
+        def to(self, _dev):
+            return self
+
+        def eval(self):
+            pass
+
+        def requires_grad_(self, _flag):
+            pass
+
+        def __call__(self, _hidden_states, _router_logits):
+            if failure_stage == "forward":
+                raise RuntimeError("boom during forward")
+
+    sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = FakeMoERunner
+    sys.modules["vllm.forward_context"].get_forward_context.return_value = SimpleNamespace(moe_layer_index=0)
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 5.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_moe_npu, "setup_distributed", lambda _device: None)
+    monkeypatch.setattr(collect_moe_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "power_law_logits_v3",
+        lambda num_tokens, n_exp, _topk, _ep, _alpha: _FakeTensor((num_tokens, n_exp), dtype="float32"),
+    )
+    monkeypatch.setattr(collect_moe_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_moe_npu, "log_perf", lambda **_kwargs: None)
+
+    if failure_stage == "none":
+        collect_moe_npu.run_moe_torch(
+            "bfloat16",
+            [4],
+            2048,
+            768,
+            8,
+            128,
+            1,
+            2,
+            "Qwen/Qwen3-30B-A3B",
+            distributed="power_law",
+            power_law_alpha=1.01,
+            perf_filename=PerfFile.MOE,
+        )
+    else:
+        expected_msg = f"boom during {'FusedMoE init' if failure_stage == 'init' else 'forward'}"
+        with pytest.raises(RuntimeError, match=expected_msg):
+            collect_moe_npu.run_moe_torch(
+                "bfloat16",
+                [4],
+                2048,
+                768,
+                8,
+                128,
+                1,
+                2,
+                "Qwen/Qwen3-30B-A3B",
+                distributed="power_law",
+                power_law_alpha=1.01,
+                perf_filename=PerfFile.MOE,
+            )
+
+    # Pre-existing global entries are preserved, while this case's registrations are removed.
+    assert env.vllm_eplb_adaptor._registered_moe_layers == [preexisting_layer]
+    assert env.ascend_routed_experts_cls.moe_counter == 7
+    assert env.comm_mod._MoECommMethods == {("ALLGATHER", 999): preexisting_comm}
+
+    # Patched functions and _EXTRA_CTX attributes are restored.
+    assert env.comm_mod.setup_moe_comm_method is env.orig_setup_moe_comm_method
+    assert env.ascend_fused_moe_mod.setup_moe_comm_method is env.orig_setup_moe_comm_method
+    assert env.ascend_fused_moe_mod.get_mc2_group is env.orig_get_mc2_group
+    assert env.extra_ctx.moe_comm_type == "PRE_EXISTING_TYPE"
+    assert env.extra_ctx.moe_comm_method == "PRE_EXISTING_METHOD"
+    assert env.extra_ctx.in_profile_run is True
+    assert env.extra_ctx.use_mega_moe is True
+
+    # Case-owned objects have zero remaining strong references and are garbage-collected.
+    assert weak_refs["routed_experts"]() is None
+    assert weak_refs["runner"]() is None
+    assert weak_refs["comm_impl"]() is None
+
+
+def test_run_moe_torch_refuses_capacity_before_constructing_fused_moe(collect_moe_npu, monkeypatch):
+    _install_fake_vllm_ascend_modules(monkeypatch)
+    device_module = MagicMock()
+    # 16 GiB device memory cannot fit DeepSeek-V3 TP1/EP1 BF16 weights (~38.3 GiB init peak).
+    device_module.get_device_properties.return_value.total_memory = 16 * 2**30
+
+    fused_moe_mock = MagicMock(side_effect=AssertionError("FusedMoEFactory must not be called when capacity refuses"))
+    sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = fused_moe_mock
+
+    monkeypatch.setattr(collect_moe_npu, "setup_distributed", lambda _device: None)
+    monkeypatch.setattr(collect_moe_npu, "get_device_module", lambda device=None: device_module)
+
+    with pytest.raises(RuntimeError, match=r"^FIXME\(kernel-limit\): does not fit:"):
+        collect_moe_npu.run_moe_torch(
+            "bfloat16",
+            [4, 16384],
+            7168,
+            2048,
+            8,
+            256,
+            1,
+            1,
+            "deepseek-ai/DeepSeek-V3",
+            perf_filename=PerfFile.MOE,
+        )
+
+    fused_moe_mock.assert_not_called()
+
+
+def test_run_moe_torch_handles_out_of_memory_at_first_vs_later_token_counts(collect_moe_npu, monkeypatch):
+    _install_fake_vllm_ascend_modules(monkeypatch)
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 96 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+
+    class FakeMoERunner:
+        def __init__(self, **_kwargs):
+            self.routed_experts = SimpleNamespace(
+                named_parameters=lambda recurse=False: [],
+                quant_method=None,
+            )
+            self.moe_config = object()
+
+        def to(self, _dev):
+            return self
+
+        def eval(self):
+            pass
+
+        def requires_grad_(self, _flag):
+            pass
+
+        def __call__(self, _hidden_states, _router_logits):
+            pass
+
+    sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = FakeMoERunner
+    sys.modules["vllm.forward_context"].get_forward_context.return_value = SimpleNamespace(moe_layer_index=0)
+
+    monkeypatch.setattr(collect_moe_npu, "setup_distributed", lambda _device: None)
+    monkeypatch.setattr(collect_moe_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "power_law_logits_v3",
+        lambda num_tokens, n_exp, _topk, _ep, _alpha: _FakeTensor((num_tokens, n_exp), dtype="float32"),
+    )
+
+    logged_tokens = []
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "log_perf",
+        lambda **kwargs: logged_tokens.append(kwargs["item_list"][0]["num_tokens"]),
+    )
+
+    # Case 1: OOM on the first token count (num_tokens_idx == 0) must re-raise so the case is recorded as failed.
+    call_idx = {"n": 0}
+
+    @contextmanager
+    def oom_on_first(**_kwargs):
+        raise collect_moe_npu.torch.OutOfMemoryError("NPU OOM at first token count")
+        yield
+
+    monkeypatch.setattr(collect_moe_npu, "benchmark_with_power", oom_on_first)
+    with pytest.raises(collect_moe_npu.torch.OutOfMemoryError, match="NPU OOM at first token count"):
+        collect_moe_npu.run_moe_torch(
+            "bfloat16",
+            [4, 16],
+            2048,
+            768,
+            8,
+            128,
+            1,
+            1,
+            "Qwen/Qwen3-30B-A3B",
+            perf_filename=PerfFile.MOE,
+        )
+    assert logged_tokens == []
+
+    # Case 2: OOM on a later token count (num_tokens_idx > 0) stops the inner token sweep after logging earlier points.
+    @contextmanager
+    def oom_on_second(**kwargs):
+        call_idx["n"] += 1
+        if call_idx["n"] >= 2:
+            raise collect_moe_npu.torch.OutOfMemoryError("NPU OOM at second token count")
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 5.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_moe_npu, "benchmark_with_power", oom_on_second)
+    collect_moe_npu.run_moe_torch(
+        "bfloat16",
+        [4, 16, 32],
+        2048,
+        768,
+        8,
+        128,
+        1,
+        1,
+        "Qwen/Qwen3-30B-A3B",
+        perf_filename=PerfFile.MOE,
+    )
+    assert logged_tokens == [4]

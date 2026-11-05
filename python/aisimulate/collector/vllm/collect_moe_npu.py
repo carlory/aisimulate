@@ -61,7 +61,7 @@ from collector.helper import (
     log_perf,
     power_law_logits_v3,
 )
-from collector.vllm.collect_moe import _resolve_moe_runtime_config
+from collector.vllm.collect_moe import _load_model_moe_config, _resolve_moe_runtime_config
 from collector.vllm.utils import setup_distributed
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -168,11 +168,13 @@ def _single_rank_allgather_comm_only():
     orig_setup_comm = comm_mod.setup_moe_comm_method
     orig_fused_setup_comm = getattr(ascend_fused_moe_mod, "setup_moe_comm_method", None)
     orig_get_mc2_group = getattr(ascend_fused_moe_mod, "get_mc2_group", None)
+    comm_methods_dict = getattr(comm_mod, "_MoECommMethods", None)
+    prev_comm_methods = dict(comm_methods_dict) if isinstance(comm_methods_dict, dict) else None
 
     def _setup_allgather_only(moe_config):
         comm_impl = comm_mod.AllGatherCommImpl(moe_config)
-        if hasattr(comm_mod, "_MoECommMethods") and hasattr(comm_mod, "_moe_config_key"):
-            comm_mod._MoECommMethods[comm_mod._moe_config_key(MoECommType.ALLGATHER, moe_config)] = comm_impl
+        if isinstance(comm_methods_dict, dict) and hasattr(comm_mod, "_moe_config_key"):
+            comm_methods_dict[comm_mod._moe_config_key(MoECommType.ALLGATHER, moe_config)] = comm_impl
         return comm_impl
 
     comm_mod.setup_moe_comm_method = _setup_allgather_only
@@ -188,6 +190,81 @@ def _single_rank_allgather_comm_only():
             ascend_fused_moe_mod.setup_moe_comm_method = orig_fused_setup_comm
         if orig_get_mc2_group is not None:
             ascend_fused_moe_mod.get_mc2_group = orig_get_mc2_group
+        if isinstance(comm_methods_dict, dict) and prev_comm_methods is not None:
+            comm_methods_dict.clear()
+            comm_methods_dict.update(prev_comm_methods)
+
+
+@contextlib.contextmanager
+def _scoped_ascend_eplb_registration():
+    """Remove only this case's AscendRoutedExperts registrations on exit.
+
+    In `vllm_ascend/ops/fused_moe/routed_experts.py:386-387,421,488` and
+    `vllm_ascend/eplb/adaptor/vllm_adaptor.py:55-66` @ v0.30.0rc2,
+    `AscendRoutedExperts.__init__` calls `self.init_eplb(n_shared_experts)`
+    when `not vllm_config.use_v2_model_runner`, which increments
+    `AscendRoutedExperts.moe_counter` and appends `self` to the process-global
+    `VllmEplbAdaptor._registered_moe_layers` list. Snapshot the pre-existing
+    list length and counter before `FusedMoE(...)` and restore them in
+    `finally:` so layers created by this case are released on both normal exit
+    and construction/forward failure without clearing pre-existing state.
+    """
+    try:
+        import vllm_ascend.eplb.adaptor.vllm_adaptor as vllm_adaptor_mod
+
+        vllm_eplb_adaptor_cls = getattr(vllm_adaptor_mod, "VllmEplbAdaptor", None)
+    except ImportError:
+        vllm_eplb_adaptor_cls = None
+    try:
+        import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_mod
+
+        ascend_routed_experts_cls = getattr(routed_experts_mod, "AscendRoutedExperts", None)
+    except ImportError:
+        ascend_routed_experts_cls = None
+
+    registered_layers = (
+        getattr(vllm_eplb_adaptor_cls, "_registered_moe_layers", None) if vllm_eplb_adaptor_cls is not None else None
+    )
+    prev_len = len(registered_layers) if isinstance(registered_layers, list) else None
+    prev_counter = (
+        getattr(ascend_routed_experts_cls, "moe_counter", None) if ascend_routed_experts_cls is not None else None
+    )
+    try:
+        yield
+    finally:
+        if isinstance(registered_layers, list) and prev_len is not None:
+            del registered_layers[prev_len:]
+        if ascend_routed_experts_cls is not None and prev_counter is not None:
+            ascend_routed_experts_cls.moe_counter = prev_counter
+
+
+def _resolve_npu_moe_runtime_config(model_name: str, module_config: dict) -> dict:
+    """Resolve FusedMoE arguments for vllm-ascend==0.30.0rc2 model code.
+
+    Wraps `_resolve_moe_runtime_config` and aligns `MiniMaxAI/MiniMax-M3`
+    (`model_type == "minimax_m3"`) with `MiniMaxM3MoE.__init__` in
+    `vllm_ascend/models/minimax_m3/minimax_m3.py:806-818` (and base vLLM
+    `vllm/models/minimax_m3/nvidia/model.py:249-269` @ v0.30.0):
+    `activation="swigluoai_uninterleave"`, `swiglu_limit=config.swiglu_limit`,
+    `swiglu_alpha=config.swiglu_alpha`, `swiglu_beta=getattr(config, "swiglu_beta", 1.0)`,
+    and `apply_routed_scale_to_output=True`. In `vllm_ascend/ops/fused_moe/moe_mlp.py:66-76`,
+    `SWIGLUOAI_UNINTERLEAVE` dispatches to `DeviceOperator.clipped_swiglu`
+    (contiguous gate/up halves `hidden_states[..., :hidden_size]` and
+    `hidden_states[..., hidden_size:]`), matching the uninterleaved `[gate; up]`
+    `w13_weight` layout.
+    """
+    runtime_config = dict(_resolve_moe_runtime_config(model_name, module_config))
+    model_config = _load_model_moe_config(model_name)
+    model_type = str(model_config.get("model_type", ""))
+    runtime_config["swiglu_alpha"] = None
+    runtime_config["swiglu_beta"] = None
+    if model_type == "minimax_m3":
+        runtime_config["activation"] = "swigluoai_uninterleave"
+        runtime_config["swiglu_limit"] = model_config.get("swiglu_limit")
+        runtime_config["swiglu_alpha"] = model_config.get("swiglu_alpha", 1.702)
+        runtime_config["swiglu_beta"] = model_config.get("swiglu_beta", 1.0)
+        runtime_config["apply_routed_scale_to_output"] = True
+    return runtime_config
 
 
 def _initialize_routed_expert_parameters(routed_experts, device) -> None:
@@ -243,7 +320,6 @@ def get_moe_test_cases():
         raise RuntimeError("collector/cases/base_ops/moe.yaml must define moe_vllm_npu quantization_modes")
 
     test_cases = []
-    seen_consumer_keys: dict[tuple, str] = {}
 
     for common_moe_testcase in get_moe_npu_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
@@ -258,25 +334,6 @@ def get_moe_test_cases():
         for moe_type in enabled_moe_types:
             if not moe_model_allows_quantization("vllm_npu", model_name, moe_type):
                 continue
-
-            consumer_key = (
-                moe_type,
-                tuple(common_moe_testcase.num_tokens_list),
-                common_moe_testcase.hidden_size,
-                common_moe_testcase.inter_size,
-                common_moe_testcase.topk,
-                common_moe_testcase.num_experts,
-                common_moe_testcase.tp,
-                common_moe_testcase.ep,
-                common_moe_testcase.token_expert_distribution,
-                common_moe_testcase.power_law_alpha,
-            )
-            owner = seen_consumer_keys.get(consumer_key)
-            if owner is not None:
-                raise ValueError(
-                    f"vllm_npu MoE rows {owner!r} and {model_name!r} collide on persisted consumer key {consumer_key}"
-                )
-            seen_consumer_keys[consumer_key] = model_name
 
             test_cases.append(
                 [
@@ -353,7 +410,7 @@ def run_moe_torch(
     dev_mod.empty_cache()
 
     module_config = get_moe_quantization_module_config("vllm_npu", moe_type, model_name=model_name)
-    runtime_config = _resolve_moe_runtime_config(model_name, module_config)
+    runtime_config = _resolve_npu_moe_runtime_config(model_name, module_config)
     if runtime_config["use_grouped_topk"]:
         num_expert_group = runtime_config["num_expert_group"]
         topk_group = runtime_config["topk_group"]
@@ -412,9 +469,21 @@ def run_moe_torch(
                 "activation_situ_linear_beta": runtime_config["activation_situ_linear_beta"],
             }
 
+    swiglu_kwargs = {}
+    if runtime_config["swiglu_alpha"] is not None:
+        swiglu_kwargs["swiglu_alpha"] = runtime_config["swiglu_alpha"]
+    if runtime_config["swiglu_beta"] is not None:
+        swiglu_kwargs["swiglu_beta"] = runtime_config["swiglu_beta"]
+
     moe_module = None
+    routed_experts = None
+    comm_impl = None
     try:
-        with set_current_vllm_config(vllm_config), _single_rank_allgather_comm_only():
+        with (
+            set_current_vllm_config(vllm_config),
+            _single_rank_allgather_comm_only(),
+            _scoped_ascend_eplb_registration(),
+        ):
             moe_module = FusedMoE(
                 num_experts=num_experts,
                 top_k=topk,
@@ -439,14 +508,15 @@ def run_moe_torch(
                 activation=runtime_config["activation"],
                 router_logits_dtype=router_logits_dtype,
                 apply_routed_scale_to_output=runtime_config["apply_routed_scale_to_output"],
+                **swiglu_kwargs,
                 **situ_kwargs,
             )
 
-            try:
-                moe_module.to(torch.device(device))
-            except NotImplementedError:
-                moe_module = moe_module.to_empty(device=torch.device(device))
-
+            # torch.set_default_device(device) is active above, so FusedMoE parameters
+            # and buffers are allocated directly on `device` (matching collect_moe.py);
+            # avoid a broad NotImplementedError->to_empty fallback that would leave
+            # non-parameter buffers or correction bias uninitialized.
+            moe_module.to(torch.device(device))
             moe_module.eval()
             moe_module.requires_grad_(False)
 
@@ -464,100 +534,112 @@ def run_moe_torch(
             # campaigns trace and register the exact Ascend MoE kernel labels.
             source = "vllm_default"
 
-            for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
-                hidden_states = torch.randn([num_tokens, hidden_size], dtype=torch.bfloat16, device=device)
-                num_iter = 5 if distributed == "power_law" else 1
-                logits_dtype = router_logits_dtype or torch.bfloat16
+            prev_moe_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
+            prev_moe_comm_method = getattr(_EXTRA_CTX, "moe_comm_method", None)
+            prev_in_profile_run = getattr(_EXTRA_CTX, "in_profile_run", False)
+            prev_use_mega_moe = getattr(_EXTRA_CTX, "use_mega_moe", False)
+            try:
+                for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
+                    hidden_states = torch.randn([num_tokens, hidden_size], dtype=torch.bfloat16, device=device)
+                    num_iter = 5 if distributed == "power_law" else 1
+                    logits_dtype = router_logits_dtype or torch.bfloat16
 
-                if distributed == "power_law":
-                    previous_dtype = torch.get_default_dtype()
-                    torch.set_default_dtype(torch.float32)
-                    try:
+                    if distributed == "power_law":
+                        previous_dtype = torch.get_default_dtype()
+                        torch.set_default_dtype(torch.float32)
+                        try:
+                            router_logits_list = [
+                                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
+                                .to(logits_dtype)
+                                .to(device)
+                                for _ in range(num_iter)
+                            ]
+                        finally:
+                            torch.set_default_dtype(previous_dtype)
+                    elif distributed == "balanced":
                         router_logits_list = [
-                            power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
-                            .to(logits_dtype)
-                            .to(device)
-                            for _ in range(num_iter)
+                            balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)
                         ]
-                    finally:
-                        torch.set_default_dtype(previous_dtype)
-                elif distributed == "balanced":
-                    router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)]
-                else:
-                    raise ValueError(f"Unsupported distributed mode: {distributed}")
+                    else:
+                        raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-                num_warmups = 1 if distributed == "power_law" else 3
-                num_runs = 1 if distributed == "power_law" else 6
+                    num_warmups = 1 if distributed == "power_law" else 3
+                    num_runs = 1 if distributed == "power_law" else 6
 
-                def run_single_iteration(
-                    _moe_module=moe_module,
-                    _hidden_states=hidden_states,
-                    _router_logits_list=router_logits_list,
-                    _comm_impl=comm_impl,
-                ):
-                    for router_logits in _router_logits_list:
-                        forward_context = get_forward_context()
-                        if forward_context is not None:
-                            forward_context.moe_layer_index = 0
-                        _EXTRA_CTX.moe_comm_type = MoECommType.ALLGATHER
-                        _EXTRA_CTX.moe_comm_method = _comm_impl
-                        _EXTRA_CTX.in_profile_run = False
-                        _EXTRA_CTX.use_mega_moe = False
-                        _moe_module(_hidden_states, router_logits)
-
-                try:
-                    with (
-                        set_forward_context({}, vllm_config),
-                        benchmark_with_power(
-                            device=device,
-                            kernel_func=run_single_iteration,
-                            num_warmups=num_warmups,
-                            num_runs=num_runs,
-                            repeat_n=1,
-                            # MVP is eager: ACLGraph capture is a follow-up, and
-                            # benchmark_with_power has no NPUGraph arm yet.
-                            use_cuda_graph=False,
-                            allow_graph_fail=False,
-                        ) as results,
+                    def run_single_iteration(
+                        _moe_module=moe_module,
+                        _hidden_states=hidden_states,
+                        _router_logits_list=router_logits_list,
+                        _comm_impl=comm_impl,
                     ):
-                        pass
-                except torch.OutOfMemoryError:
-                    if num_tokens_idx > 0:
-                        break
-                    raise
-                finally:
-                    del hidden_states, router_logits_list
+                        for router_logits in _router_logits_list:
+                            forward_context = get_forward_context()
+                            if forward_context is not None:
+                                forward_context.moe_layer_index = 0
+                            _EXTRA_CTX.moe_comm_type = MoECommType.ALLGATHER
+                            _EXTRA_CTX.moe_comm_method = _comm_impl
+                            _EXTRA_CTX.in_profile_run = False
+                            _EXTRA_CTX.use_mega_moe = False
+                            _moe_module(_hidden_states, router_logits)
 
-                latency = results["latency_ms"] / num_iter
+                    try:
+                        with (
+                            set_forward_context({}, vllm_config),
+                            benchmark_with_power(
+                                device=device,
+                                kernel_func=run_single_iteration,
+                                num_warmups=num_warmups,
+                                num_runs=num_runs,
+                                repeat_n=1,
+                                # MVP is eager: ACLGraph capture is a follow-up, and
+                                # benchmark_with_power has no NPUGraph arm yet.
+                                use_cuda_graph=False,
+                                allow_graph_fail=False,
+                            ) as results,
+                        ):
+                            pass
+                    except torch.OutOfMemoryError:
+                        if num_tokens_idx > 0:
+                            break
+                        raise
+                    finally:
+                        del hidden_states, router_logits_list
 
-                log_perf(
-                    item_list=[
-                        {
-                            "moe_dtype": moe_type,
-                            "num_tokens": num_tokens,
-                            "hidden_size": hidden_size,
-                            "inter_size": inter_size,
-                            "topk": topk,
-                            "num_experts": num_experts,
-                            "moe_tp_size": moe_tp_size,
-                            "moe_ep_size": moe_ep_size,
-                            "distribution": (
-                                "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed
-                            ),
-                            "latency": latency,
-                        }
-                    ],
-                    framework="VLLM",
-                    version=vllm_ascend_version,
-                    device_name=device_name,
-                    op_name="moe",
-                    kernel_source=source,
-                    perf_filename=perf_filename,
-                    # No NVML-equivalent on CANN: power is never sampled on this lane.
-                    power_stats=None,
-                )
+                    latency = results["latency_ms"] / num_iter
+
+                    log_perf(
+                        item_list=[
+                            {
+                                "moe_dtype": moe_type,
+                                "num_tokens": num_tokens,
+                                "hidden_size": hidden_size,
+                                "inter_size": inter_size,
+                                "topk": topk,
+                                "num_experts": num_experts,
+                                "moe_tp_size": moe_tp_size,
+                                "moe_ep_size": moe_ep_size,
+                                "distribution": (
+                                    "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed
+                                ),
+                                "latency": latency,
+                            }
+                        ],
+                        framework="VLLM",
+                        version=vllm_ascend_version,
+                        device_name=device_name,
+                        op_name="moe",
+                        kernel_source=source,
+                        perf_filename=perf_filename,
+                        # No NVML-equivalent on CANN: power is never sampled on this lane.
+                        power_stats=None,
+                    )
+            finally:
+                _EXTRA_CTX.moe_comm_type = prev_moe_comm_type
+                _EXTRA_CTX.moe_comm_method = prev_moe_comm_method
+                _EXTRA_CTX.in_profile_run = prev_in_profile_run
+                _EXTRA_CTX.use_mega_moe = prev_use_mega_moe
     finally:
-        del moe_module
+        del moe_module, routed_experts, comm_impl
         gc.collect()
         dev_mod.empty_cache()
 

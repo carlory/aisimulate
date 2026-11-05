@@ -223,10 +223,6 @@ common_case_values:
         tensor_parallel_sizes: [1, 2, 4, 8]
         expert_parallel_sizes: [1, 2, 4, 8]
         gpu_counts: [1, 2, 4, 8]
-      full:
-        tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
-        expert_parallel_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        gpu_counts: [1, 2, 4, 8, 16, 32, 64, 128, 256]
     quantization_modes:
     - name: bfloat16
     model_cases:
@@ -240,7 +236,6 @@ common_case_values:
       num_experts: 128
       max_tp_exclusive: 8
       sweep: small
-      activation: silu
     - model_path: Qwen/Qwen3-235B-A22B
       model_aliases:
       - Qwen/Qwen3-235B-A22B-FP8
@@ -250,28 +245,24 @@ common_case_values:
       topk: 8
       num_experts: 128
       sweep: small
-      activation: silu
     - model_path: Qwen/Qwen3.5-35B-A3B
       hidden_size: 2048
       inter_size: 512
       topk: 8
       num_experts: 256
       sweep: small
-      activation: silu
     - model_path: Qwen/Qwen3.5-122B-A10B
       hidden_size: 3072
       inter_size: 1024
       topk: 8
       num_experts: 256
       sweep: small
-      activation: silu
     - model_path: MiniMaxAI/MiniMax-M3
       hidden_size: 6144
       inter_size: 3072
       topk: 4
       num_experts: 128
       sweep: small
-      activation: swigluoai
     - model_path: zai-org/GLM-5
       model_aliases:
       - zai-org/GLM-5.1
@@ -282,7 +273,6 @@ common_case_values:
       topk: 8
       num_experts: 256
       sweep: small
-      activation: silu
     - model_path: deepseek-ai/DeepSeek-V3
       model_aliases:
       - deepseek-ai/DeepSeek-R1
@@ -292,4 +282,3 @@ common_case_values:
       topk: 8
       num_experts: 256
       sweep: small
-      activation: silu
