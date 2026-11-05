@@ -34,7 +34,7 @@ from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm_ascend.quantization.configs import AscendModelSlimConfig
 
 vllm_ascend_version = im.version("vllm-ascend")
 
@@ -112,12 +112,16 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
     if gemm_type == "fp8":
-        qc = Fp8Config(
-            is_checkpoint_fp8_serialized=False,  # dynamic quant after creation
-            activation_scheme="dynamic",
-            ignored_layers=None,
-            weight_block_size=None,
-        )
+        # Base vLLM's Fp8Config dispatches to choose_scaled_mm_linear_kernel
+        # (no ScaledMM backend on NPU -> ValueError), and AscendFp8Config rejects
+        # weight_block_size=None while re-encoding block-wise fp8 to W8A8_MXFP8
+        # on Ascend 950 (fp8_block.py:AscendFp8BlockLinearMethod). Route
+        # per-channel dynamic W8A8FP8 through AscendModelSlimConfig ->
+        # AscendLinearMethod(AscendW8A8FP8DynamicLinearMethod) (prefix="" maps
+        # to key ".weight" in get_quant_type_for_layer). Note: as with fp8_block
+        # auto-requantizing to W8A8_MXFP8 on 950, future vllm-ascend releases
+        # may similarly remap W8A8*_DYNAMIC paths on A5 hardware.
+        qc = AscendModelSlimConfig({".weight": "W8A8FP8_DYNAMIC"})
     else:
         qc = None
 
@@ -147,7 +151,13 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
                         param.zero_()
 
         if gemm_type == "fp8" and hasattr(gemm, "weight"):
-            # Use process_weights_after_loading() to quantize the weights after creation
+            with torch.no_grad():
+                gemm.weight.fill_(0.01)
+                if hasattr(gemm, "weight_scale"):
+                    gemm.weight_scale.fill_(1.0)
+                if hasattr(gemm, "weight_offset"):
+                    gemm.weight_offset.zero_()
+            # Use process_weights_after_loading() to transpose weights and flatten scales
             quant_method = getattr(gemm, "quant_method", None)
             if quant_method is not None and hasattr(quant_method, "process_weights_after_loading"):
                 quant_method.process_weights_after_loading(gemm)

@@ -176,11 +176,12 @@ def collect_gemm_npu(monkeypatch):
         "vllm.config",
         "vllm.model_executor",
         "vllm.model_executor.layers",
-        "vllm.model_executor.layers.quantization",
+        "vllm_ascend",
+        "vllm_ascend.quantization",
     ):
         monkeypatch.setitem(sys.modules, name, MagicMock(name=name))
     monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.linear", MagicMock(name="linear"))
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.quantization.fp8", MagicMock(name="fp8"))
+    monkeypatch.setitem(sys.modules, "vllm_ascend.quantization.configs", MagicMock(name="configs"))
     real_version = importlib.metadata.version
     monkeypatch.setattr(
         importlib.metadata,
@@ -292,25 +293,27 @@ def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
 
 
 def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_schema(collect_gemm_npu, monkeypatch):
-    """FP8 (W8A8FP8) builds Fp8Config, calls process_weights_after_loading, and logs identical schema."""
+    """FP8 (W8A8FP8) builds AscendModelSlimConfig, prepares weights/scales, and logs identical schema."""
     from contextlib import contextmanager
 
     logged = {}
-    fp8_config_calls = []
+    modelslim_config_calls = []
     linear_calls = []
     processed_layers = []
     device_module = MagicMock()
     device_module.get_device_properties.return_value.total_memory = 64 * 2**30
     device_module.get_device_name.return_value = "Ascend950DT"
 
-    def fake_fp8_config(**kwargs):
-        fp8_config_calls.append(kwargs)
-        return ("fp8_config", kwargs)
+    def fake_modelslim_config(quant_config=None):
+        modelslim_config_calls.append(quant_config)
+        return ("ascend_modelslim_config", quant_config)
 
     def fake_linear(**kwargs):
         linear_calls.append(kwargs)
         layer = MagicMock(name="fp8_gemm_layer")
         layer.weight = MagicMock(name="weight")
+        layer.weight_scale = MagicMock(name="weight_scale")
+        layer.weight_offset = MagicMock(name="weight_offset")
         layer.quant_method.process_weights_after_loading.side_effect = processed_layers.append
         return layer
 
@@ -321,30 +324,28 @@ def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_
 
     monkeypatch.setattr(collect_gemm_npu, "setup_distributed", lambda device: None)
     monkeypatch.setattr(collect_gemm_npu, "get_device_module", lambda device=None: device_module)
-    monkeypatch.setattr(collect_gemm_npu, "Fp8Config", fake_fp8_config)
+    monkeypatch.setattr(collect_gemm_npu, "AscendModelSlimConfig", fake_modelslim_config)
     monkeypatch.setattr(collect_gemm_npu, "RowParallelLinear", fake_linear)
     monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
     monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged.update(kwargs))
 
     collect_gemm_npu.run_gemm("fp8", 16, 32, 64, perf_filename=PerfFile.GEMM)
 
-    assert fp8_config_calls == [
-        {
-            "is_checkpoint_fp8_serialized": False,
-            "activation_scheme": "dynamic",
-            "ignored_layers": None,
-            "weight_block_size": None,
-        }
-    ]
+    assert modelslim_config_calls == [{".weight": "W8A8FP8_DYNAMIC"}]
     assert len(linear_calls) == 64
     assert all(
         call["input_size"] == 64
         and call["output_size"] == 32
-        and call["quant_config"] == ("fp8_config", fp8_config_calls[0])
+        and call["quant_config"] == ("ascend_modelslim_config", modelslim_config_calls[0])
+        and call["prefix"] == ""
         and call["disable_tp"] is True
         for call in linear_calls
     )
     assert len(processed_layers) == len(linear_calls)
+    for layer in processed_layers:
+        layer.weight.fill_.assert_called_once_with(0.01)
+        layer.weight_scale.fill_.assert_called_once_with(1.0)
+        layer.weight_offset.zero_.assert_called_once_with()
     assert logged["framework"] == "VLLM"
     assert logged["version"] == "0.30.0rc2"
     assert logged["device_name"] == "Ascend950DT"
