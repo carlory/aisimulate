@@ -219,8 +219,8 @@ REGISTRY_XPU: list[OpEntry] = [
     ),
 ]
 
-# Ascend NPU (vllm-ascend) lane. MVP scope is gemm in bf16 eager mode; the
-# `vllm_npu` manifest pin resolves these entries, and both must stay in sync
+# Ascend NPU (vllm-ascend) lane. Collects gemm (bfloat16 and fp8) in eager mode;
+# the `vllm_npu` manifest pin resolves these entries, and both must stay in sync
 # (an op entry without its pin is unresolvable, a pin without ops fails
 # `validate_resolution`).
 REGISTRY_NPU: list[OpEntry] = [
