@@ -130,9 +130,8 @@ framework_specific_op_cases:
       cases:
       - id: base_transformer_gemm_shape_sweep
         description: 'Ascend NPU GEMM sweep for vLLM RowParallelLinear covering
-          transformer hidden, intermediate, and vocab-scale dimensions; bf16
-          only for the MVP (vllm-ascend has a W8A8FP8
-          lane for Ascend 950, collected once bf16 is validated on device).
+          transformer hidden, intermediate, and vocab-scale dimensions; bfloat16
+          and fp8_block (W8A8_MXFP8 on Ascend 950DT).
 
           '
         token_counts:
@@ -210,6 +209,7 @@ framework_specific_op_cases:
         - 65536
         gemm_types:
         - bfloat16
+        - fp8_block
   vllm_xpu:
     gemm:
       cases:
