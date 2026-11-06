@@ -388,13 +388,16 @@ def test_run_moe_torch_executes_single_rank_allgather_path_and_logs_standard_moe
     vllm_ascend_fused_moe_pkg.fused_moe = ascend_fused_moe_mod
     vllm_ascend_fused_moe_pkg.moe_comm_method = comm_mod
 
+    ascend_config_mod = MagicMock()
+    ascend_config_mod.init_ascend_config.side_effect = lambda cfg: observed.setdefault("vllm_config", cfg)
+
     for mod_name, mod_obj in (
         ("vllm_ascend", vllm_ascend_pkg),
         ("vllm_ascend.ops", vllm_ascend_ops_pkg),
         ("vllm_ascend.ops.fused_moe", vllm_ascend_fused_moe_pkg),
         ("vllm_ascend.ops.fused_moe.fused_moe", ascend_fused_moe_mod),
         ("vllm_ascend.ops.fused_moe.moe_comm_method", comm_mod),
-        ("vllm_ascend.ascend_config", MagicMock()),
+        ("vllm_ascend.ascend_config", ascend_config_mod),
         ("vllm_ascend.ascend_forward_context", ascend_fwd_mod),
         ("vllm_ascend.utils", MagicMock()),
     ):
@@ -482,6 +485,9 @@ def test_run_moe_torch_executes_single_rank_allgather_path_and_logs_standard_moe
     )
 
     assert observed["setup_distributed_device"] == "npu:0"
+    assert observed["vllm_config"].model_config.enforce_eager is True
+    assert observed["vllm_config"].model_config.is_moe is True
+    assert observed["vllm_config"].model_config.is_deepseek_mla is False
     assert observed["fused_moe_kwargs"]["num_experts"] == 128
     assert observed["fused_moe_kwargs"]["top_k"] == 8
     assert observed["fused_moe_kwargs"]["tp_size"] == 2  # logical_parallel_size = moe_ep_size

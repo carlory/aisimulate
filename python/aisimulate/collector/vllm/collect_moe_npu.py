@@ -428,10 +428,16 @@ def run_moe_torch(
 
     quant_config = None
     vllm_config = VllmConfig()
+    # AscendConfig.derive_and_validate (vllm_ascend/ascend_config.py:730,852,888,946
+    # @ v0.30.0rc2) reads model_config.enforce_eager, is_moe, and is_deepseek_mla
+    # during init_ascend_config(vllm_config).
     vllm_config.model_config = SimpleNamespace(
         dtype=torch.bfloat16,
+        enforce_eager=True,
         hf_text_config=SimpleNamespace(model_type=""),
         hf_config=SimpleNamespace(model_type=""),
+        is_deepseek_mla=False,
+        is_moe=True,
         model="collector_dummy",
         quantization_config=None,
         runner_type=None,
