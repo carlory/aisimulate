@@ -359,12 +359,32 @@ def test_run_moe_torch_executes_single_rank_allgather_path_and_logs_standard_moe
     device_module.get_device_properties.return_value.total_memory = 96 * 2**30
     device_module.get_device_name.return_value = "Ascend950DT"
 
-    fake_extra_ctx = SimpleNamespace(
-        moe_comm_type=None,
-        moe_comm_method=None,
-        in_profile_run=True,
-        use_mega_moe=True,
-    )
+    in_forward_ctx = {"active": False}
+
+    class _StrictExtraCtxProxy:
+        def __init__(self):
+            object.__setattr__(
+                self,
+                "_store",
+                {
+                    "moe_comm_type": None,
+                    "moe_comm_method": None,
+                    "in_profile_run": True,
+                    "use_mega_moe": True,
+                },
+            )
+
+        def __getattr__(self, name):
+            if not in_forward_ctx["active"]:
+                raise AssertionError("Forward context is not set.")
+            return self._store.get(name)
+
+        def __setattr__(self, name, value):
+            if not in_forward_ctx["active"]:
+                raise AssertionError("Forward context is not set.")
+            self._store[name] = value
+
+    fake_extra_ctx = _StrictExtraCtxProxy()
     fake_comm_type = SimpleNamespace(ALLGATHER="ALLGATHER")
     fake_comm_impl = object()
 
@@ -446,6 +466,15 @@ def test_run_moe_torch_executes_single_rank_allgather_path_and_logs_standard_moe
                 )
             )
 
+    @contextmanager
+    def fake_set_forward_context(*_a, **_kw):
+        in_forward_ctx["active"] = True
+        try:
+            yield
+        finally:
+            in_forward_ctx["active"] = False
+
+    monkeypatch.setattr(collect_moe_npu, "set_forward_context", fake_set_forward_context)
     sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = FakeMoERunner
     sys.modules["vllm.forward_context"].get_forward_context.return_value = SimpleNamespace(moe_layer_index=-1)
 

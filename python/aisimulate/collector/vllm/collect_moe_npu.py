@@ -238,6 +238,30 @@ def _scoped_ascend_eplb_registration():
             ascend_routed_experts_cls.moe_counter = prev_counter
 
 
+@contextlib.contextmanager
+def _scoped_extra_ctx(extra_ctx):
+    """Snapshot and restore `_EXTRA_CTX` MoE fields when a forward context is active outside."""
+    try:
+        prev_moe_comm_type = getattr(extra_ctx, "moe_comm_type", None)
+        prev_moe_comm_method = getattr(extra_ctx, "moe_comm_method", None)
+        prev_in_profile_run = getattr(extra_ctx, "in_profile_run", False)
+        prev_use_mega_moe = getattr(extra_ctx, "use_mega_moe", False)
+        has_active_ctx = True
+    except AssertionError:
+        has_active_ctx = False
+    try:
+        yield
+    finally:
+        if has_active_ctx:
+            try:
+                extra_ctx.moe_comm_type = prev_moe_comm_type
+                extra_ctx.moe_comm_method = prev_moe_comm_method
+                extra_ctx.in_profile_run = prev_in_profile_run
+                extra_ctx.use_mega_moe = prev_use_mega_moe
+            except AssertionError:
+                pass
+
+
 def _resolve_npu_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     """Resolve FusedMoE arguments for vllm-ascend==0.30.0rc2 model code.
 
@@ -540,11 +564,7 @@ def run_moe_torch(
             # campaigns trace and register the exact Ascend MoE kernel labels.
             source = "vllm_default"
 
-            prev_moe_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
-            prev_moe_comm_method = getattr(_EXTRA_CTX, "moe_comm_method", None)
-            prev_in_profile_run = getattr(_EXTRA_CTX, "in_profile_run", False)
-            prev_use_mega_moe = getattr(_EXTRA_CTX, "use_mega_moe", False)
-            try:
+            with _scoped_extra_ctx(_EXTRA_CTX):
                 for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
                     hidden_states = torch.randn([num_tokens, hidden_size], dtype=torch.bfloat16, device=device)
                     num_iter = 5 if distributed == "power_law" else 1
@@ -591,6 +611,7 @@ def run_moe_torch(
                     try:
                         with (
                             set_forward_context({}, vllm_config),
+                            _scoped_extra_ctx(_EXTRA_CTX),
                             benchmark_with_power(
                                 device=device,
                                 kernel_func=run_single_iteration,
@@ -639,11 +660,6 @@ def run_moe_torch(
                         # No NVML-equivalent on CANN: power is never sampled on this lane.
                         power_stats=None,
                     )
-            finally:
-                _EXTRA_CTX.moe_comm_type = prev_moe_comm_type
-                _EXTRA_CTX.moe_comm_method = prev_moe_comm_method
-                _EXTRA_CTX.in_profile_run = prev_in_profile_run
-                _EXTRA_CTX.use_mega_moe = prev_use_mega_moe
     finally:
         del moe_module, routed_experts, comm_impl
         gc.collect()
