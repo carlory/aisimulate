@@ -233,6 +233,7 @@ impl ExecutionProfileSelection {
             Some(spec.engine.backend_version.as_deref().unwrap_or("")),
             hardware["misc"]["nccl_version"].as_str(),
             hardware["misc"]["oneccl_version"].as_str(),
+            hardware["misc"]["hccl_version"].as_str(),
         ]
         .into_iter()
         .flatten()

@@ -163,11 +163,21 @@ def test_main_parses_family_layout_changed_file(create_charts_module, tmp_path, 
     assert calls == [("h200_sxm", "sglang", "0.5.14", ["gemm_perf.parquet"])]
 
 
-def test_main_skips_nccl_family_layout_changed_file(create_charts_module, tmp_path, monkeypatch):
-    """The 6-part branch mirrors the legacy branch's nccl/oneccl pseudo-backend
-    skip: nccl/oneccl perf files are ignored, matching how the 5-part branch
-    treats data/<system>/nccl/<version>/nccl_perf.parquet."""
-    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/comm/nccl/2.20/nccl_perf.parquet"
+@pytest.mark.parametrize(
+    ("system", "backend", "version", "filename"),
+    [
+        ("h200_sxm", "nccl", "2.20", "nccl_perf.parquet"),
+        ("b60", "oneccl", "2022.0.0", "oneccl_perf.parquet"),
+        ("ascend_950dt", "hccl", "9.2.0", "hccl_perf.parquet"),
+    ],
+)
+def test_main_skips_comm_pseudo_backend_family_layout_changed_file(
+    create_charts_module, tmp_path, monkeypatch, system, backend, version, filename
+):
+    """The 6-part branch mirrors the legacy branch's nccl/oneccl/hccl pseudo-backend
+    skip: nccl/oneccl/hccl perf files are ignored, matching how the 5-part branch
+    treats data/<system>/<backend>/<version>/<backend>_perf.parquet."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/{system}/comm/{backend}/{version}/{filename}"
 
     calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
 

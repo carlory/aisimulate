@@ -1363,6 +1363,7 @@ class PerfDataFilename(Enum):
     gemm = "gemm_perf.parquet"
     nccl = "nccl_perf.parquet"
     oneccl = "oneccl_perf.parquet"
+    hccl = "hccl_perf.parquet"
     generation_attention = "generation_attention_perf.parquet"
     context_attention = "context_attention_perf.parquet"
     encoder_attention = "encoder_attention_perf.parquet"

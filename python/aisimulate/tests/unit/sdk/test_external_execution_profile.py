@@ -681,7 +681,7 @@ def _communication_table(path, latency):
     )
 
 
-@pytest.mark.parametrize("kind", ["nccl", "oneccl"])
+@pytest.mark.parametrize("kind", ["nccl", "oneccl", "hccl"])
 @pytest.mark.parametrize("escape", ["absolute", "parent"])
 def test_communication_versions_cannot_escape_snapshot(profile, kind, escape):
     _, _, _, root, _ = profile
@@ -701,7 +701,7 @@ def test_communication_versions_cannot_escape_snapshot(profile, kind, escape):
         RustForwardPassPerfModel.best_available(config)
 
 
-@pytest.mark.parametrize("kind", ["nccl", "oneccl"])
+@pytest.mark.parametrize("kind", ["nccl", "oneccl", "hccl"])
 @pytest.mark.parametrize("layout", ["comm/", ""])
 def test_first_communication_query_uses_retained_snapshot(profile, kind, layout):
     _, _, _, root, _ = profile
@@ -716,7 +716,7 @@ def test_first_communication_query_uses_retained_snapshot(profile, kind, layout)
         RustForwardPassPerfModel.best_available(config)
 
 
-@pytest.mark.parametrize("kind", ["nccl", "oneccl"])
+@pytest.mark.parametrize("kind", ["nccl", "oneccl", "hccl"])
 def test_communication_table_must_be_retained(profile, kind):
     _, payload, publish, root, _ = profile
     table = root / f"data/h200_sxm/comm/{kind}/test/{kind}_perf.parquet"

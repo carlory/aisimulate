@@ -89,7 +89,7 @@ class TestAscend950dtSystemSpec:
         misc = spec["misc"]
         assert set(misc["nccl_mem"]) == {1, 2, 4, 8}
         assert misc["other_mem"] > 0
-        # comm (HCCL) data is post-MVP: no comm version is pinned yet.
+        assert misc["hccl_version"] == "9.2.0"
         assert "nccl_version" not in misc
         assert "oneccl_version" not in misc
 

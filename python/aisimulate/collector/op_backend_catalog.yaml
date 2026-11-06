@@ -205,6 +205,7 @@ families:
   - family: comm
     op_files:
       - custom_allreduce_perf
+      - hccl_perf
       - moe_a2a_perf
       - nccl_perf
       - oneccl_perf

@@ -50,14 +50,21 @@ pub struct CommunicationTable {
     /// `None` when the system YAML has no `misc.oneccl_version` declared
     /// (most systems — OneCCL is the XPU fallback path).
     oneccl_root: Option<PathBuf>,
+    /// Directory containing `hccl_perf.parquet`. Preferentially resolved as
+    /// `<systems_root>/<data_dir>/comm/hccl/<misc.hccl_version>/`, with
+    /// the legacy non-family path retained during the dual-read transition.
+    /// `None` when the system YAML has no `misc.hccl_version` declared
+    /// (HCCL is the Ascend NPU fallback path).
+    hccl_root: Option<PathBuf>,
     /// Ordered, priority-sorted sources for `custom_allreduce_perf.parquet`
     /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
-    /// default (`CommunicationTable::new`). NCCL/OneCCL remain framework-agnostic
-    /// and are loaded directly from `nccl_root` / `oneccl_root`.
+    /// default (`CommunicationTable::new`). NCCL/OneCCL/HCCL remain framework-agnostic
+    /// and are loaded directly from `nccl_root` / `oneccl_root` / `hccl_root`.
     custom_allreduce_sources: Vec<PerfSource>,
     custom_allreduce: OnceLock<Result<CustomAllReduceGrids, AicError>>,
     nccl: OnceLock<Result<NcclGrids, AicError>>,
     oneccl: OnceLock<Result<NcclGrids, AicError>>,
+    hccl: OnceLock<Result<NcclGrids, AicError>>,
 }
 
 /// Measured fan-out (`tp_size` / `num_gpus`) -> immutable `u64` message-size
@@ -172,6 +179,22 @@ impl CommunicationTable {
         .expect("fixed-map resolution is infallible")
     }
 
+    pub fn new_with_hccl(
+        data_root: PathBuf,
+        nccl_root: Option<PathBuf>,
+        oneccl_root: Option<PathBuf>,
+        hccl_root: Option<PathBuf>,
+    ) -> Self {
+        Self::with_sources_and_hccl(
+            data_root,
+            nccl_root,
+            oneccl_root,
+            hccl_root,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
+    }
+
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
     /// `perf_db_sources` (Python-supplied) for `custom_allreduce_perf.parquet`.
     /// The file falls back to its primary `data_root/custom_allreduce_perf.parquet`
@@ -184,16 +207,28 @@ impl CommunicationTable {
         oneccl_root: Option<PathBuf>,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
+        Self::with_sources_and_hccl(data_root, nccl_root, oneccl_root, None, resolver)
+    }
+
+    pub fn with_sources_and_hccl(
+        data_root: PathBuf,
+        nccl_root: Option<PathBuf>,
+        oneccl_root: Option<PathBuf>,
+        hccl_root: Option<PathBuf>,
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
         let custom_allreduce_sources =
             resolver.sources_for("custom_allreduce_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             nccl_root,
             oneccl_root,
+            hccl_root,
             custom_allreduce_sources,
             custom_allreduce: OnceLock::new(),
             nccl: OnceLock::new(),
             oneccl: OnceLock::new(),
+            hccl: OnceLock::new(),
         })
     }
 
@@ -205,6 +240,11 @@ impl CommunicationTable {
     /// System-wide OneCCL data dir (vLLM/XPU systems only).
     pub(crate) fn oneccl_root(&self) -> Option<&Path> {
         self.oneccl_root.as_deref()
+    }
+
+    /// System-wide HCCL data dir (Ascend NPU systems only).
+    pub(crate) fn hccl_root(&self) -> Option<&Path> {
+        self.hccl_root.as_deref()
     }
 
     /// Raw custom-allreduce value (latency ms + power/energy), 1-D
@@ -319,9 +359,14 @@ impl CommunicationTable {
             .load_oneccl()
             .ok()
             .and_then(|grids| grids.slice(dtype_name, operation));
+        let hccl = self
+            .load_hccl()
+            .ok()
+            .and_then(|grids| grids.slice(dtype_name, operation));
         let fanouts = nccl
             .into_iter()
             .chain(oneccl)
+            .chain(hccl)
             .flat_map(|slice| slice.keys().copied());
         let effective = measured_fanout_slice(fanouts, num_gpus, spec.node.num_gpus_per_node)
             .unwrap_or(num_gpus);
@@ -368,7 +413,23 @@ impl CommunicationTable {
         if let Some(curve) = self.load_nccl().ok().and_then(|grids| grids.curve(key)) {
             return interp_message_size(curve, message_size);
         }
-        // Fall back to OneCCL.
+        if let Some(curve) = self.load_oneccl().ok().and_then(|grids| grids.curve(key)) {
+            return interp_message_size(curve, message_size);
+        }
+        if let Some(curve) = self.load_hccl().ok().and_then(|grids| grids.curve(key)) {
+            return interp_message_size(curve, message_size);
+        }
+        // Fall back to OneCCL / HCCL error reporting when no source has the curve.
+        if self.hccl_root.is_some() && self.oneccl_root.is_none() {
+            let grids = self.load_hccl().map_err(clone_err)?;
+            let curve = grids.curve(key).ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "neither NCCL nor HCCL has data for {key:?} at {}",
+                    self.data_root.display()
+                ))
+            })?;
+            return interp_message_size(curve, message_size);
+        }
         let grids = self.load_oneccl().map_err(clone_err)?;
         let curve = grids.curve(key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
@@ -417,6 +478,12 @@ impl CommunicationTable {
     fn nccl_empirical_source(&self) -> Result<&NcclGrids, AicError> {
         if let Ok(grids) = self.load_nccl() {
             return Ok(grids);
+        }
+        if let Ok(grids) = self.load_oneccl() {
+            return Ok(grids);
+        }
+        if self.hccl_root.is_some() && self.oneccl_root.is_none() {
+            return self.load_hccl().map_err(clone_err);
         }
         self.load_oneccl().map_err(clone_err)
     }
@@ -481,7 +548,7 @@ impl CommunicationTable {
         operation: &str,
     ) -> Result<Option<u32>, AicError> {
         let dtype_name = dtype.name();
-        Ok([self.load_nccl(), self.load_oneccl()]
+        Ok([self.load_nccl(), self.load_oneccl(), self.load_hccl()]
             .into_iter()
             .flatten()
             .filter_map(|grids| grids.slice(dtype_name, operation))
@@ -522,6 +589,19 @@ impl CommunicationTable {
                 ));
             };
             load_nccl_parquet(&root.join("oneccl_perf.parquet"))
+        });
+        cell.as_ref()
+    }
+
+    fn load_hccl(&self) -> Result<&NcclGrids, &AicError> {
+        let cell = self.hccl.get_or_init(|| {
+            let Some(root) = self.hccl_root.as_ref() else {
+                return Err(AicError::PerfDatabase(
+                    "HCCL data not configured for this system (no misc.hccl_version in YAML)"
+                        .to_string(),
+                ));
+            };
+            load_nccl_parquet(&root.join("hccl_perf.parquet"))
         });
         cell.as_ref()
     }
@@ -877,10 +957,12 @@ mod tests {
             data_root: PathBuf::from("synthetic"),
             nccl_root: None,
             oneccl_root: None,
+            hccl_root: None,
             custom_allreduce_sources: Vec::new(),
             custom_allreduce: custom_allreduce_cell,
             nccl: nccl_cell,
             oneccl: oneccl_cell,
+            hccl: OnceLock::new(),
         }
     }
 
@@ -1406,6 +1488,44 @@ mod tests {
         assert_eq!(
             table.query_nccl(half, "all_reduce", 8, 1024.0).unwrap(),
             LeafValue::latency_only(1.0)
+        );
+    }
+
+    #[test]
+    fn hccl_fallback_resolves_when_nccl_and_oneccl_absent() {
+        let key = ("half".to_string(), "all_reduce".to_string(), 4);
+        let hccl_cell = OnceLock::new();
+        let hccl_curves = BTreeMap::from([(key, latency_curve(BTreeMap::from([(1024, 3.5)])))]);
+        assert!(hccl_cell.set(Ok(NcclGrids::from_curves(hccl_curves))).is_ok());
+        let table = CommunicationTable {
+            data_root: PathBuf::from("synthetic"),
+            nccl_root: None,
+            oneccl_root: None,
+            hccl_root: Some(PathBuf::from("synthetic/hccl")),
+            custom_allreduce_sources: Vec::new(),
+            custom_allreduce: OnceLock::new(),
+            nccl: OnceLock::new(),
+            oneccl: OnceLock::new(),
+            hccl: hccl_cell,
+        };
+        assert_eq!(
+            table
+                .query_nccl(CommQuantMode::Half, "all_reduce", 4, 1024.0)
+                .unwrap(),
+            LeafValue::latency_only(3.5)
+        );
+        assert_eq!(
+            table
+                .nccl_max_num_gpus(CommQuantMode::Half, "all_reduce")
+                .unwrap(),
+            Some(4)
+        );
+        let err = table
+            .query_nccl(CommQuantMode::Half, "all_gather", 4, 1024.0)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"perf database error: neither NCCL nor HCCL has data for ("half", "all_gather", 4) at synthetic"#
         );
     }
 }

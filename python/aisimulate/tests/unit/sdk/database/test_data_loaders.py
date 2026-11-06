@@ -112,6 +112,7 @@ def test_nccl_load_data_tolerates_null_misc(tmp_path):
         NCCL.load_data(database)
         assert database._nccl_data.loaded is False
         assert database._oneccl_data is None
+        assert database._hccl_data is None
     finally:
         NCCL.clear_cache()
 

@@ -11,10 +11,11 @@ engine (`perf_database/table_view.rs`).
   delegates here. No SOL clamp, no extrapolation in the legacy
   ``_correct_data`` / ``__init__`` path.
 
-- ``NCCL`` owns ``nccl_perf.parquet`` AND the optional oneCCL fallback table.
-  ``PerfDatabase.query_nccl`` delegates here. The oneCCL fallback is loaded
-  alongside NCCL data because ``query_nccl`` picks between them at query
-  time (XPU systems load oneCCL when NCCL is empty).
+- ``NCCL`` owns ``nccl_perf.parquet`` AND the optional oneCCL / HCCL fallback
+  tables. ``PerfDatabase.query_nccl`` delegates here. The oneCCL and HCCL
+  fallbacks are loaded alongside NCCL data because ``query_nccl`` picks between
+  them at query time (XPU systems load oneCCL and Ascend NPU systems load HCCL
+  when NCCL is empty).
 
 - ``P2P`` has no silicon table — latency is computed analytically from
   ``inter_node_bw`` + ``p2p_latency``. The base ``Operation.load_data``
@@ -23,7 +24,7 @@ engine (`perf_database/table_view.rs`).
 
 Cache key matches every other migrated op: ``(systems_root, system,
 backend, version, enable_shared_layer)``. The engine-owned source resolver
-keeps ``nccl`` / ``oneccl`` primary-only, while framework-versioned
+keeps ``nccl`` / ``oneccl`` / ``hccl`` primary-only, while framework-versioned
 ``comm/{sglang,trtllm,vllm}`` tables may fill from strictly earlier versions
 of the same storage backend.
 """
@@ -108,14 +109,15 @@ class NCCL(_core.NCCL, OpShellKit):
     """
     NCCL collective communication operation with power tracking.
 
-    Owns ``_data_cache`` for the packaged NCCL Parquet perf table plus ``_oneccl_data_cache``
-    for the optional oneCCL fallback (loaded together because
-    ``query_nccl`` picks between them at query time when NCCL data is
-    empty on XPU systems).
+    Owns ``_data_cache`` for the packaged NCCL Parquet perf table plus
+    ``_oneccl_data_cache`` and ``_hccl_data_cache`` for the optional oneCCL /
+    HCCL fallbacks (loaded together because ``query_nccl`` picks between them
+    at query time when NCCL data is empty on XPU / Ascend NPU systems).
     """
 
     _data_cache: ClassVar[dict] = {}
     _oneccl_data_cache: ClassVar[dict] = {}
+    _hccl_data_cache: ClassVar[dict] = {}
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -127,15 +129,16 @@ class NCCL(_core.NCCL, OpShellKit):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Fetches the engine's NCCL table view plus the optional oneCCL fallback,
-        binds ``database._nccl_data`` and ``database._oneccl_data``."""
+        """Idempotent. Fetches the engine's NCCL table view plus the optional oneCCL / HCCL
+        fallbacks, binds ``database._nccl_data``, ``database._oneccl_data``, and
+        ``database._hccl_data``."""
         import os
 
         from aisimulate_core.sdk.engine_table_view import fetch_table_view
         from aisimulate_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache or key not in cls._oneccl_data_cache:
+        if key not in cls._data_cache or key not in cls._oneccl_data_cache or key not in cls._hccl_data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
             # NCCL data lives under ``systems_data_root/nccl/<nccl_version>/``
@@ -147,7 +150,7 @@ class NCCL(_core.NCCL, OpShellKit):
             # Optional like oneccl below (the Rust comm_root resolution is
             # Option-tolerant): a spec without misc.nccl_version binds an
             # unloaded wrapper instead of KeyError-ing the whole load.
-            # Locals first, commit last — a failed oneccl fetch must not
+            # Locals first, commit last — a failed oneccl/hccl fetch must not
             # leave only the nccl side cached (see GEMM.load_data).
             nccl_version = (database.system_spec.get("misc") or {}).get("nccl_version")
             if nccl_version:
@@ -171,19 +174,34 @@ class NCCL(_core.NCCL, OpShellKit):
             else:
                 oneccl_loaded = None
 
+            # HCCL fallback (Ascend NPU systems). Only loaded when system_spec
+            # declares an ``hccl_version`` under ``misc``.
+            hccl_version = (database.system_spec.get("misc") or {}).get("hccl_version")
+            if hccl_version:
+                hccl_primary = resolve_op_data_path(system_data_root, "hccl", hccl_version, PerfDataFilename.hccl.value)
+                hccl_loaded = LoadedOpData(
+                    fetch_table_view(database, "_hccl_data"), PerfDataFilename.hccl, hccl_primary
+                )
+            else:
+                hccl_loaded = None
+
             cls._data_cache[key] = nccl_loaded
             cls._oneccl_data_cache[key] = oneccl_loaded
+            cls._hccl_data_cache[key] = hccl_loaded
             cls._record_load()
 
         if "_nccl_data" not in database.__dict__:
             database._nccl_data = cls._data_cache[key]
         if "_oneccl_data" not in database.__dict__:
             database._oneccl_data = cls._oneccl_data_cache[key]
+        if "_hccl_data" not in database.__dict__:
+            database._hccl_data = cls._hccl_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._oneccl_data_cache.clear()
+        cls._hccl_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_nccl)

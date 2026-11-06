@@ -25,8 +25,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --device)
             device="$2"
-            if [[ "$device" != "cuda" && "$device" != "xpu" ]]; then
-                echo "Error: --device must be 'cuda' or 'xpu'"
+            if [[ "$device" != "cuda" && "$device" != "xpu" && "$device" != "npu" ]]; then
+                echo "Error: --device must be 'cuda', 'xpu', or 'npu'"
                 exit 1
             fi
             shift 2
@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default to vllm backend for XPU if not explicitly set
-if [[ "$device" == "xpu" && "$all_reduce_backend_set" == "false" ]]; then
+# Default to vllm backend for XPU / NPU if not explicitly set
+if [[ ( "$device" == "xpu" || "$device" == "npu" ) && "$all_reduce_backend_set" == "false" ]]; then
     all_reduce_backend="vllm"
 fi
 
@@ -96,6 +96,8 @@ if [[ "$device" == "cuda" ]]; then
     GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 elif [[ "$device" == "xpu" ]]; then
     GPU_COUNT=$(xpu-smi discovery 2>/dev/null | grep -c "Device Name:")
+elif [[ "$device" == "npu" ]]; then
+    GPU_COUNT=$(npu-smi info -l 2>/dev/null | grep -c "NPU ID")
 fi
 
 echo "Found $GPU_COUNT GPUs."
@@ -155,8 +157,24 @@ elif [[ "$device" == "xpu" ]]; then
             done
         done
     done
+elif [[ "$device" == "npu" ]]; then
+    if [[ "$measure_power" == "true" ]]; then
+        echo "Error: --measure_power is not yet supported for HCCL NPU benchmarks"
+        exit 1
+    fi
+    hccl_ops=("all_gather" "reduce_scatter" "all_reduce")
+    dtypes=("half" "int8")
+
+    for n in "${gpu_count_list[@]}"; do
+        for op in "${hccl_ops[@]}"; do
+            for dtype in "${dtypes[@]}"; do
+                echo "Running HCCL $op benchmark with $n NPUs, dtype=$dtype"
+                python3 "$SCRIPT_DIR/collect_hccl.py" -n "$n" -O "$op" --dtype "$dtype"
+            done
+        done
+    done
 else
-    echo "Skipping NCCL/oneCCL benchmarks because device is $device"
+    echo "Skipping NCCL/oneCCL/HCCL benchmarks because device is $device"
 fi
 
 echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."

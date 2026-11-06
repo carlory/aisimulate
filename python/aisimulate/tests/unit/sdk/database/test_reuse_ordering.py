@@ -675,6 +675,7 @@ def test_legacy_comm_override_preserves_physical_backend(systems_root: Path, sto
     [
         ("nccl", common.PerfDataFilename.nccl),
         ("oneccl", common.PerfDataFilename.oneccl),
+        ("hccl", common.PerfDataFilename.hccl),
     ],
 )
 def test_library_communication_stays_primary_only(
