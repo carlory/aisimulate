@@ -47,9 +47,9 @@ class TestAscend950dtSystemSpec:
         assert gpu["mem_capacity"] == 96 * 1024**3
         assert gpu["mem_bw"] == 4e12  # official 4TB/s
         assert gpu["fp8_tc_flops"] == 1e15  # official 1 PFLOPS FP8/MXFP8/HiF8
-        # Official BF16/FP16 peak of the top 36-Cube-Core tier (white paper
-        # table 3-1); which of the 547/486/425 tiers this node is is an on-device check.
-        assert gpu["bfloat16_tc_flops"] == 547e12
+        # 430 TFLOPS measured (bf16 8192x8192 matmul, single card, 2026-11-06);
+        # white paper 28-core bin (425 TFLOPS theoretical), not the flagship 36-core (547).
+        assert gpu["bfloat16_tc_flops"] == 430e12
         assert node["num_gpus_per_node"] == 8
         # Per-NPU single direction, derived from the same white paper §4.6 figure
         # as the yaml comment: 2016 GB/s bidirectional = 72 lane x 112 Gbps x 2 / 8,
