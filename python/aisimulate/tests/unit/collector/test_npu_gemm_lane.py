@@ -258,4 +258,45 @@ def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
         }
     ]
     assert not hasattr(collect_gemm_npu, "xpu_graph_measure_enabled")
+    assert hasattr(collect_gemm_npu, "npu_graph_measure_enabled")
     device_module.get_device_capability.assert_not_called()
+
+
+def test_run_gemm_enables_acl_graph_when_env_flag_is_set(collect_gemm_npu, monkeypatch):
+    """When VLLM_NPU_ENABLE_ACL_GRAPH=1, run_gemm passes use_cuda_graph=True and logs used_cuda_graph=True."""
+    from contextlib import contextmanager
+
+    logged = {}
+    benchmark_kwargs = {}
+    device_module = MagicMock()
+    device_module.is_available.return_value = True
+    device_module.get_device_properties.return_value.total_memory = 64 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        benchmark_kwargs.update(kwargs)
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 32.0, "used_cuda_graph": kwargs["use_cuda_graph"]}
+
+    monkeypatch.setenv("VLLM_NPU_ENABLE_ACL_GRAPH", "1")
+    monkeypatch.setattr("collector.helper.torch_npu_module", lambda: device_module)
+    monkeypatch.setattr(collect_gemm_npu, "setup_distributed", lambda device: None)
+    monkeypatch.setattr(collect_gemm_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged.update(kwargs))
+
+    collect_gemm_npu.run_gemm("bfloat16", 16, 32, 64, perf_filename=PerfFile.GEMM)
+
+    assert benchmark_kwargs["use_cuda_graph"] is True
+    assert benchmark_kwargs["allow_graph_fail"] is False
+    assert logged["item_list"] == [
+        {
+            "gemm_dtype": "bfloat16",
+            "m": 16,
+            "n": 32,
+            "k": 64,
+            "latency": pytest.approx(0.5),
+            "used_cuda_graph": True,
+        }
+    ]

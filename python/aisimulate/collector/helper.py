@@ -510,7 +510,7 @@ def benchmark_with_power(
     _close_phase("eager_warmup")
 
     # ═══════════════════════════════════════════════════════════════════
-    # Device Graph Capture with Optional Fallback (CUDA: CUDAGraph, XPU: XPUGraph)
+    # Device Graph Capture with Optional Fallback (CUDA: CUDAGraph, XPU: XPUGraph, NPU: NPUGraph)
     # ═══════════════════════════════════════════════════════════════════
     g = None
     capture_phase_completed = False
@@ -519,10 +519,23 @@ def benchmark_with_power(
     # Neither mode guarantees CUDA recovery after an interrupted capture.
     try:
         is_cuda = dev_mod is torch.cuda  # match the requested device, not just host capability
-        use_graph = use_cuda_graph and (is_cuda or torch.xpu.is_available())
+        npu_mod = None if is_cuda else torch_npu_module()
+        is_npu = npu_mod is not None and dev_mod is npu_mod
+        is_xpu = not is_cuda and not is_npu and hasattr(torch, "xpu") and torch.xpu.is_available()
+        use_graph = use_cuda_graph and (is_cuda or (is_npu and npu_mod.is_available()) or is_xpu)
         if use_graph:
-            graph_cls = torch.cuda.CUDAGraph if is_cuda else torch.xpu.XPUGraph
-            graph_ctx = torch.cuda.graph if is_cuda else torch.xpu.graph
+            if is_cuda:
+                graph_cls = torch.cuda.CUDAGraph
+                graph_ctx = torch.cuda.graph
+                graph_backend = "CUDA"
+            elif is_npu:
+                graph_cls = npu_mod.NPUGraph
+                graph_ctx = npu_mod.graph
+                graph_backend = "NPU"
+            else:
+                graph_cls = torch.xpu.XPUGraph
+                graph_ctx = torch.xpu.graph
+                graph_backend = "XPU"
             g = graph_cls()
             if explicit_graph_cleanup:
                 original_stream = dev_mod.current_stream()
@@ -544,7 +557,7 @@ def benchmark_with_power(
             except Exception as e:
                 if not allow_graph_fail:
                     if not is_cuda:
-                        # XPU: free the partial capture's pool; repeated failures otherwise leak -> OOM/DEVICE_LOST.
+                        # XPU/NPU: free the partial capture's pool; repeated failures otherwise leak -> OOM/DEVICE_LOST.
                         g = None
                         try:
                             dev_mod.empty_cache()
@@ -552,7 +565,7 @@ def benchmark_with_power(
                             pass
                     raise
                 logging.getLogger(__name__).warning(
-                    f"{'CUDA' if is_cuda else 'XPU'} graph capture failed: {e}. Falling back to eager execution."
+                    f"{graph_backend} graph capture failed: {e}. Falling back to eager execution."
                 )
                 if explicit_graph_cleanup:
                     g.reset()
@@ -4459,6 +4472,21 @@ def xpu_graph_measure_enabled() -> bool:
         return bool(vllm_envs.VLLM_XPU_ENABLE_XPU_GRAPH)
     except Exception:
         return False
+
+
+NPU_ACL_GRAPH_ENV = "VLLM_NPU_ENABLE_ACL_GRAPH"
+
+
+def npu_graph_measure_enabled() -> bool:
+    """Return True when Ascend ACL-graph measurement is enabled on an available NPU.
+
+    Defaults off (eager) unless ``VLLM_NPU_ENABLE_ACL_GRAPH`` is set to a truthy
+    value (``"1"``, ``"true"``, ``"yes"``) and ``torch.npu.is_available()`` is True.
+    """
+    npu = torch_npu_module()
+    if npu is None or not npu.is_available():
+        return False
+    return _parse_bool_env(NPU_ACL_GRAPH_ENV, default=False)
 
 
 def torch_npu_module():

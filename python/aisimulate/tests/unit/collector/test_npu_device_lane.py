@@ -139,3 +139,142 @@ def test_cuda_context_error_probes_npu_runtime_instead_of_cuda(monkeypatch):
 
     npu.synchronize = _dead_sync
     assert helper_mod.cuda_context_error("npu:0") == "RuntimeError: ACL stream synchronize failed"
+
+
+@pytest.mark.parametrize(
+    ("env_val", "available", "expected"),
+    [
+        (None, True, False),
+        ("0", True, False),
+        ("false", True, False),
+        ("1", True, True),
+        ("true", True, True),
+        ("YES", True, True),
+        ("1", False, False),
+    ],
+)
+def test_npu_graph_measure_enabled_honors_env_and_device_availability(monkeypatch, env_val, available, expected):
+    npu = _device_module("npu", available=available)
+    _install_torch(monkeypatch, npu=npu, npu_plugin=True)
+    if env_val is None:
+        monkeypatch.delenv("VLLM_NPU_ENABLE_ACL_GRAPH", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_NPU_ENABLE_ACL_GRAPH", env_val)
+
+    assert helper_mod.npu_graph_measure_enabled() is expected
+
+
+@requires_no_torch_npu
+def test_npu_graph_measure_enabled_is_false_without_plugin(monkeypatch):
+    _install_torch(monkeypatch)
+    monkeypatch.setenv("VLLM_NPU_ENABLE_ACL_GRAPH", "1")
+    assert helper_mod.npu_graph_measure_enabled() is False
+
+
+def test_benchmark_with_power_captures_and_replays_npu_graph(monkeypatch):
+    from contextlib import contextmanager
+
+    events = []
+
+    class FakeNPUGraph:
+        def __init__(self):
+            events.append("npu_graph:create")
+
+        def replay(self):
+            events.append("npu_graph:replay")
+
+        def reset(self):
+            events.append("npu_graph:reset")
+
+    @contextmanager
+    def fake_graph_ctx(graph_obj):
+        assert isinstance(graph_obj, FakeNPUGraph)
+        events.append("npu_graph:capture_begin")
+        yield
+        events.append("npu_graph:capture_end")
+
+    class FakeEvent:
+        def __init__(self, enable_timing=False):
+            events.append("event:create")
+
+        def record(self):
+            events.append("event:record")
+
+        def elapsed_time(self, end_event):
+            events.append("event:elapsed")
+            return 18.0
+
+    npu = _device_module("npu", available=True)
+    npu.NPUGraph = FakeNPUGraph
+    npu.graph = fake_graph_ctx
+    npu.Event = FakeEvent
+    npu.synchronize = lambda *_a, **_k: events.append("npu:synchronize")
+    npu.empty_cache = lambda: events.append("npu:empty_cache")
+    npu.current_stream = lambda: "npu_stream"
+    npu.set_stream = lambda s: events.append(f"npu:set_stream:{s}")
+
+    torch = _install_torch(monkeypatch, cuda=False, xpu=False, npu=npu, npu_plugin=True)
+    torch.cuda.CUDAGraph = lambda: (_ for _ in ()).throw(AssertionError("CUDAGraph must not be used on npu"))
+    torch.xpu.XPUGraph = lambda: (_ for _ in ()).throw(AssertionError("XPUGraph must not be used on npu"))
+
+    with helper_mod.benchmark_with_power(
+        device="npu:0",
+        kernel_func=lambda: events.append("kernel"),
+        num_warmups=2,
+        num_runs=3,
+        repeat_n=1,
+        measure_power=False,
+        use_cuda_graph=True,
+        allow_graph_fail=False,
+    ) as results:
+        pass
+
+    assert results["used_cuda_graph"] is True
+    assert results["latency_ms"] == pytest.approx(6.0)
+    assert events.count("npu_graph:create") == 1
+    assert events.count("npu_graph:capture_begin") == 1
+    assert events.count("npu_graph:capture_end") == 1
+    # 2 eager warmups + 1 capture = 3 kernel calls; 2 graph warmups + 3 timed runs = 5 replays
+    assert events.count("kernel") == 3
+    assert events.count("npu_graph:replay") == 5
+
+
+def test_benchmark_with_power_npu_graph_capture_failure_cleans_cache_and_raises(monkeypatch):
+    from contextlib import contextmanager
+
+    events = []
+
+    class FakeNPUGraph:
+        def __init__(self):
+            events.append("npu_graph:create")
+
+    @contextmanager
+    def failing_graph_ctx(graph_obj):
+        events.append("npu_graph:capture_begin")
+        raise RuntimeError("ACL stream capture failed (207008)")
+        yield
+
+    npu = _device_module("npu", available=True)
+    npu.NPUGraph = FakeNPUGraph
+    npu.graph = failing_graph_ctx
+    npu.synchronize = lambda *_a, **_k: events.append("npu:synchronize")
+    npu.empty_cache = lambda: events.append("npu:empty_cache")
+
+    _install_torch(monkeypatch, cuda=False, xpu=False, npu=npu, npu_plugin=True)
+
+    with (
+        pytest.raises(RuntimeError, match="ACL stream capture failed"),
+        helper_mod.benchmark_with_power(
+            device="npu:0",
+            kernel_func=lambda: events.append("kernel"),
+            num_warmups=1,
+            num_runs=2,
+            repeat_n=1,
+            measure_power=False,
+            use_cuda_graph=True,
+            allow_graph_fail=False,
+        ),
+    ):
+        pass
+
+    assert "npu:empty_cache" in events

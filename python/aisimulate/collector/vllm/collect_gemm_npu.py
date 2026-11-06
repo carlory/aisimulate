@@ -5,8 +5,8 @@
 
 The NPU counterpart to the CUDA vLLM GEMM collector: it builds
 RowParallelLinear layers, expands YAML-backed matrix shapes and logs perf
-rows through the device-agnostic helpers. MVP scope: bf16 only, eager only,
-no power sampling.
+rows through the device-agnostic helpers. MVP scope: bf16 only, eager by
+default (or ACL graph when ``VLLM_NPU_ENABLE_ACL_GRAPH=1``), no power sampling.
 
 The pinned version is the vllm-ascend release, not base vLLM: vllm-ascend
 ships the Ascend kernels, so it is the kernel-source identity of these rows
@@ -20,7 +20,7 @@ import os
 
 import torch
 from collector.case_generator import get_gemm_case_specs, get_gemm_type_specs
-from collector.helper import benchmark_with_power, get_device_module, log_perf
+from collector.helper import benchmark_with_power, get_device_module, log_perf, npu_graph_measure_enabled
 
 # The stock vLLM harness utilities reused here are device-neutral:
 # create_vllm_config builds a plain VllmConfig from a local fake HF model and
@@ -164,10 +164,10 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
             num_warmups=3,
             num_runs=6,
             repeat_n=1,
-            # MVP is eager: ACL graph capture is a follow-up, and
-            # benchmark_with_power has no NPU graph arm (helper.py use_graph is
-            # CUDA/XPU only), so `used_cuda_graph` is recorded False below.
-            use_cuda_graph=False,
+            # Default is eager (VLLM_NPU_ENABLE_ACL_GRAPH unset/0 -> False);
+            # setting VLLM_NPU_ENABLE_ACL_GRAPH=1 enables ACL graph capture
+            # via torch.npu.NPUGraph, and `used_cuda_graph` records the mode.
+            use_cuda_graph=npu_graph_measure_enabled(),
             allow_graph_fail=False,
         ) as results:
             pass
@@ -195,8 +195,8 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
                 "n": n,
                 "k": k,
                 "latency": results["latency_ms"] / outside_loop_count,
-                # Shared vLLM gemm_perf schema column; always False while the
-                # lane is eager-only.
+                # Shared vLLM gemm_perf schema column: False in default eager
+                # mode, True when captured under ACL graph (NPUGraph).
                 "used_cuda_graph": results["used_cuda_graph"],
             }
         ],
