@@ -8,7 +8,7 @@ pin is unresolvable, a manifest entry without ops fails ``validate_resolution``)
 so they are asserted together here. Neither an Ascend device, ``torch_npu`` nor
 ``vllm_ascend`` exists on CI or dev machines, so the collector module itself is
 imported against stubbed ``torch``/``vllm``/``vllm_ascend`` modules; the point is
-its declared shape (bf16 only, eager, npu:0, no power), not its timings.
+its declared shape (bfloat16 and fp8, eager, npu:0, no power), not its timings.
 """
 
 import functools
@@ -135,9 +135,9 @@ def test_npu_gemm_entry_uses_the_standard_vllm_gemm_entrypoints():
 # ---------------------------------------------------------------------------
 
 
-def test_npu_gemm_cases_are_bf16_only():
-    # The vllm_npu YAML partition declares bf16 only for the MVP.
-    assert get_gemm_type_specs("vllm_npu") == ["bfloat16"]
+def test_npu_gemm_cases_declare_bfloat16_and_fp8():
+    # The vllm_npu YAML partition declares bfloat16 and fp8 (W8A8FP8).
+    assert get_gemm_type_specs("vllm_npu") == ["bfloat16", "fp8"]
 
 
 def test_npu_gemm_shape_sweep_expands():
@@ -170,9 +170,18 @@ def _with_exit_stack(func):
 @pytest.fixture
 def collect_gemm_npu(monkeypatch):
     """Import the collector against stubbed torch / vLLM / vllm-ascend."""
-    for name in ("torch", "vllm", "vllm.config", "vllm.model_executor", "vllm.model_executor.layers"):
+    for name in (
+        "torch",
+        "vllm",
+        "vllm.config",
+        "vllm.model_executor",
+        "vllm.model_executor.layers",
+        "vllm_ascend",
+        "vllm_ascend.quantization",
+    ):
         monkeypatch.setitem(sys.modules, name, MagicMock(name=name))
     monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.linear", MagicMock(name="linear"))
+    monkeypatch.setitem(sys.modules, "vllm_ascend.quantization.configs", MagicMock(name="configs"))
     real_version = importlib.metadata.version
     monkeypatch.setattr(
         importlib.metadata,
@@ -192,12 +201,27 @@ def collect_gemm_npu(monkeypatch):
         sys.modules.pop(MODULE, None)
 
 
-def test_test_cases_are_all_bfloat16(collect_gemm_npu):
+def test_test_cases_expand_bfloat16_and_fp8(collect_gemm_npu):
     cases = collect_gemm_npu.get_gemm_test_cases()
+    specs = get_gemm_case_specs("vllm_npu")
 
     assert cases
-    assert {gemm_type for gemm_type, *_ in cases} == {"bfloat16"}
-    assert len(cases) == len(get_gemm_case_specs("vllm_npu"))
+    assert {gemm_type for gemm_type, *_ in cases} == {"bfloat16", "fp8"}
+    assert len(cases) == 2 * len(specs)
+    assert [(m, n, k) for gemm_type, m, n, k in cases if gemm_type == "bfloat16"] == [
+        (spec.x, spec.n, spec.k) for spec in specs
+    ]
+    assert [(m, n, k) for gemm_type, m, n, k in cases if gemm_type == "fp8"] == [
+        (spec.x, spec.n, spec.k) for spec in specs
+    ]
+
+
+def test_gemm_peak_footprint_bytes_adds_fp8_staging(collect_gemm_npu):
+    bf16_fixed = collect_gemm_npu._gemm_peak_footprint_bytes("bfloat16", 16, 32, 64, copies=0)
+    fp8_fixed = collect_gemm_npu._gemm_peak_footprint_bytes("fp8", 16, 32, 64, copies=0)
+
+    assert bf16_fixed == 16 * 64 * 2
+    assert fp8_fixed == bf16_fixed + 32 * 64
 
 
 def test_version_logged_is_the_vllm_ascend_version(collect_gemm_npu):
@@ -211,8 +235,8 @@ def test_run_gemm_defaults_to_npu_0_and_refuses_other_dtypes(collect_gemm_npu):
     signature = inspect.signature(collect_gemm_npu.run_gemm.__wrapped__)
     assert signature.parameters["device"].default == "npu:0"
 
-    with pytest.raises(RuntimeError, match="collects bfloat16 only"):
-        collect_gemm_npu.run_gemm("fp8", 16, 16, 16, perf_filename=PerfFile.GEMM)
+    with pytest.raises(RuntimeError, match="collects bfloat16 and fp8 only"):
+        collect_gemm_npu.run_gemm("fp8_block", 16, 16, 16, perf_filename=PerfFile.GEMM)
 
 
 def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
@@ -221,9 +245,14 @@ def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
 
     logged = {}
     benchmark_kwargs = {}
+    linear_calls = []
     device_module = MagicMock()
     device_module.get_device_properties.return_value.total_memory = 64 * 2**30
     device_module.get_device_name.return_value = "Ascend950DT"
+
+    def fake_linear(**kwargs):
+        linear_calls.append(kwargs)
+        return MagicMock(name="gemm_layer")
 
     @contextmanager
     def fake_benchmark(**kwargs):
@@ -233,11 +262,13 @@ def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
 
     monkeypatch.setattr(collect_gemm_npu, "setup_distributed", lambda device: None)
     monkeypatch.setattr(collect_gemm_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_gemm_npu, "RowParallelLinear", fake_linear)
     monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
     monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged.update(kwargs))
 
     collect_gemm_npu.run_gemm("bfloat16", 16, 32, 64, perf_filename=PerfFile.GEMM)
 
+    assert linear_calls and all(call["quant_config"] is None for call in linear_calls)
     assert benchmark_kwargs["use_cuda_graph"] is False
     assert benchmark_kwargs["allow_graph_fail"] is False
     assert logged["framework"] == "VLLM"
@@ -259,3 +290,87 @@ def test_run_gemm_logs_eager_row_without_power(collect_gemm_npu, monkeypatch):
     ]
     assert not hasattr(collect_gemm_npu, "xpu_graph_measure_enabled")
     device_module.get_device_capability.assert_not_called()
+
+
+def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_schema(collect_gemm_npu, monkeypatch):
+    """FP8 (W8A8FP8) builds AscendModelSlimConfig, prepares weights/scales, and logs identical schema."""
+    from contextlib import contextmanager
+
+    logged = {}
+    modelslim_config_calls = []
+    linear_calls = []
+    processed_layers = []
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 64 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+
+    def fake_modelslim_config(quant_config=None):
+        modelslim_config_calls.append(quant_config)
+        return ("ascend_modelslim_config", quant_config)
+
+    def fake_linear(**kwargs):
+        linear_calls.append(kwargs)
+        layer = MagicMock(name="fp8_gemm_layer")
+        layer.weight = MagicMock(name="weight")
+        layer.weight.shape = (32, 64)
+        layer.weight.dtype = collect_gemm_npu.torch.float8_e4m3fn
+        layer.weight.device = "npu:0"
+        layer.weight_scale = MagicMock(name="weight_scale")
+        layer.weight_offset = MagicMock(name="weight_offset")
+        layer.quant_method.process_weights_after_loading.side_effect = processed_layers.append
+        return layer
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 128.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_gemm_npu, "setup_distributed", lambda device: None)
+    monkeypatch.setattr(collect_gemm_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_gemm_npu, "AscendModelSlimConfig", fake_modelslim_config)
+    monkeypatch.setattr(collect_gemm_npu, "RowParallelLinear", fake_linear)
+    monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged.update(kwargs))
+
+    collect_gemm_npu.run_gemm("fp8", 16, 32, 64, perf_filename=PerfFile.GEMM)
+
+    assert modelslim_config_calls == [{".weight": "W8A8FP8_DYNAMIC"}]
+    assert len(linear_calls) == 64
+    assert all(
+        call["input_size"] == 64
+        and call["output_size"] == 32
+        and call["quant_config"] == ("ascend_modelslim_config", modelslim_config_calls[0])
+        and call["prefix"] == ""
+        and call["disable_tp"] is True
+        for call in linear_calls
+    )
+    assert len(processed_layers) == len(linear_calls)
+    for layer in processed_layers:
+        layer.weight.fill_.assert_not_called()
+        layer.weight.copy_.assert_called_once_with(collect_gemm_npu.torch.full.return_value.to.return_value)
+        layer.weight_scale.fill_.assert_called_once_with(1.0)
+        layer.weight_offset.zero_.assert_called_once_with()
+    collect_gemm_npu.torch.full.assert_called_with(
+        (32, 64),
+        0.01,
+        dtype=collect_gemm_npu.torch.bfloat16,
+        device="npu:0",
+    )
+    collect_gemm_npu.torch.full.return_value.to.assert_called_with(collect_gemm_npu.torch.float8_e4m3fn)
+    assert logged["framework"] == "VLLM"
+    assert logged["version"] == "0.30.0rc2"
+    assert logged["device_name"] == "Ascend950DT"
+    assert logged["op_name"] == "gemm"
+    assert logged["kernel_source"] == "vllm_default"
+    assert logged["perf_filename"] is PerfFile.GEMM
+    assert logged["power_stats"] is None
+    assert logged["item_list"] == [
+        {
+            "gemm_dtype": "fp8",
+            "m": 16,
+            "n": 32,
+            "k": 64,
+            "latency": pytest.approx(2.0),
+            "used_cuda_graph": False,
+        }
+    ]
