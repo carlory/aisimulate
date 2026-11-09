@@ -105,6 +105,7 @@ def trace_benchmark(monkeypatch, *, source=SOURCE, failure=None, explicit=None, 
         "get_device_module": lambda device=None: cuda,
         "logging": logging,
         "time": time,
+        "torch_npu_module": lambda: None,
         "worker_heartbeat": lambda: events.append("heartbeat"),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
