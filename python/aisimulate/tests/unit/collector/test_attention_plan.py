@@ -272,9 +272,10 @@ def test_sglang_attention_runtime_fields_are_not_persisted_dimensions():
     assert isinstance(source_kw, ast.Name) and source_kw.id == "attn_backend_name"
 
 
-def test_only_the_xpu_collector_reads_the_framework_neutral_helper():
+def test_only_the_xpu_and_npu_collectors_read_the_framework_neutral_helper():
     for relative_path, calls in (
         ("collector/vllm/collect_attn_xpu.py", 2),
+        ("collector/vllm/collect_attn_npu.py", 2),
         ("collector/vllm/collect_attn.py", 0),
         ("collector/sglang/collect_attn.py", 0),
         ("collector/trtllm/collect_attn.py", 0),
