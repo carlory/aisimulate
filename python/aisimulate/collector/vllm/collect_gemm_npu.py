@@ -4,9 +4,10 @@
 """vLLM GEMM collector for Huawei Ascend NPU devices (vllm-ascend).
 
 The NPU counterpart to the CUDA vLLM GEMM collector: it builds
-RowParallelLinear layers, prepares supported FP8 (W8A8FP8) paths, expands
-YAML-backed matrix shapes and logs perf rows through the device-agnostic
-helpers. Eager only, no power sampling.
+RowParallelLinear layers, prepares supported FP8 (W8A8FP8) and MXFP8
+(`fp8_block` -> `W8A8_MXFP8`) paths, expands YAML-backed matrix shapes and
+logs perf rows through the device-agnostic helpers. Eager only, no power
+sampling.
 
 The pinned version is the vllm-ascend release, not base vLLM: vllm-ascend
 ships the Ascend kernels, so it is the kernel-source identity of these rows
@@ -34,6 +35,7 @@ from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.quantization.configs import AscendModelSlimConfig
 
 vllm_ascend_version = im.version("vllm-ascend")
@@ -63,16 +65,19 @@ def _get_cached_vllm_config(dtype):
 
 def _gemm_peak_footprint_bytes(gemm_type: str, m: int, n: int, k: int, copies: int = 1) -> int:
     """Peak GEMM case footprint (bytes): input + copies*(weight+output) bf16,
-    plus fp8 int8 staging (n*k).
+    plus fp8 int8 staging (n*k) or fp8_block (W8A8_MXFP8) bf16-to-mxfp8
+    quantization staging (n*k*3).
 
     ``copies=0`` returns just the copy-independent portion (input + staging).
-    Over-reserves for fp8 paths (weight/output sized as bf16) on purpose.
+    Over-reserves for quantized paths (weight/output sized as bf16) on purpose.
     """
     input_bytes = m * k * 2
     per_copy = (n * k + m * n) * 2
     footprint = input_bytes + per_copy * max(copies, 0)
     if gemm_type == "fp8":
         footprint += n * k
+    elif gemm_type == "fp8_block":
+        footprint += n * k * 3
     return footprint
 
 
@@ -95,10 +100,11 @@ def get_gemm_test_cases():
 
 @with_exit_stack
 def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
-    if gemm_type not in ("bfloat16", "fp8"):
-        # The YAML partition declares bfloat16 and fp8 (W8A8FP8); anything else
-        # would be benchmarked as unquantized bf16 under the wrong dtype label.
-        raise RuntimeError(f"vllm_npu gemm collects bfloat16 and fp8 only, got {gemm_type!r}")
+    if gemm_type not in ("bfloat16", "fp8", "fp8_block"):
+        # The YAML partition declares bfloat16, fp8 (W8A8FP8), and fp8_block
+        # (W8A8_MXFP8); anything else would be benchmarked as unquantized bf16
+        # under the wrong dtype label.
+        raise RuntimeError(f"vllm_npu gemm collects bfloat16, fp8, and fp8_block only, got {gemm_type!r}")
 
     setup_distributed(device)
 
@@ -122,8 +128,31 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
         # auto-requantizing to W8A8_MXFP8 on 950, future vllm-ascend releases
         # may similarly remap W8A8*_DYNAMIC paths on A5 hardware.
         qc = AscendModelSlimConfig({".weight": "W8A8FP8_DYNAMIC"})
+    elif gemm_type == "fp8_block":
+        # On Ascend 950DT (is_950() == True), vllm-ascend's AscendFp8BlockLinearMethod
+        # (vllm_ascend/quantization/methods/w8a8/fp8_block.py:168-231) resolves
+        # block scales and re-encodes Linear weights via torch_npu.npu_dynamic_mx_quant
+        # to W8A8_MXFP8 (group_size=32), delegating apply() directly to
+        # AscendW8A8MXFP8DynamicLinearMethod (w8a8_mxfp8.py:44-243). Route
+        # fp8_block directly through AscendModelSlimConfig({".weight": "W8A8_MXFP8",
+        # "group_size": 32}) -> AscendLinearMethod(AscendW8A8MXFP8DynamicLinearMethod)
+        # (prefix="" maps to key ".weight" in get_quant_type_for_layer).
+        qc = AscendModelSlimConfig({".weight": "W8A8_MXFP8", "group_size": 32})
     else:
         qc = None
+
+    # VllmConfig is identical across gemm cases; build once per worker and
+    # reuse (construction re-scans package entry_points, which is slow).
+    # Enter set_current_vllm_config and call init_ascend_config BEFORE
+    # RowParallelLinear construction: AscendW8A8MXFP8DynamicLinearMethod.__init__
+    # reads get_current_vllm_config().quant_config.quant_description, and
+    # process_weights_after_loading -> maybe_trans_nz reads
+    # get_ascend_config().weight_nz_mode.
+    vllm_config = _get_cached_vllm_config(dtype)
+    vllm_config.quant_config = qc
+    if gemm_type == "fp8_block":
+        init_ascend_config(vllm_config)
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     def create_gemm():
         gemm = RowParallelLinear(
@@ -170,15 +199,40 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
             quant_method = getattr(gemm, "quant_method", None)
             if quant_method is not None and hasattr(quant_method, "process_weights_after_loading"):
                 quant_method.process_weights_after_loading(gemm)
+        elif gemm_type == "fp8_block" and hasattr(gemm, "weight"):
+            with torch.no_grad():
+                # Synthesize a BF16 weight tensor and dynamically MX-quantize it
+                # (group_size=32) via torch_npu.npu_dynamic_mx_quant, matching
+                # AscendFp8BlockLinearMethod._mx_quantize (fp8_block.py:117-127)
+                # and avoiding CANN aclnnInplaceFillScalar on DT_FLOAT8_E4M3FN.
+                raw_weight = torch.full(
+                    gemm.weight.shape,
+                    0.01,
+                    dtype=dtype,
+                    device=gemm.weight.device,
+                )
+                npu_mod = get_device_module(device)
+                mx_quant = getattr(torch.ops.npu, "npu_dynamic_mx_quant", None) or getattr(
+                    npu_mod, "npu_dynamic_mx_quant", None
+                )
+                if callable(mx_quant):
+                    q_weight, mx_scale = mx_quant(raw_weight, dst_type=gemm.weight.dtype)
+                    gemm.weight.copy_(q_weight)
+                    if hasattr(gemm, "weight_scale"):
+                        gemm.weight_scale.copy_(mx_scale.reshape(gemm.weight_scale.shape).view(torch.uint8))
+                else:
+                    gemm.weight.copy_(raw_weight.to(gemm.weight.dtype))
+                    if hasattr(gemm, "weight_scale"):
+                        # E8M0 exponent 127 encodes 2^(127-127) = 1.0.
+                        gemm.weight_scale.fill_(127)
+            # Transform weight to (k, n) FRACTAL_NZ and weight_scale to (ceil(k/64), n, 2).
+            quant_method = getattr(gemm, "quant_method", None)
+            if quant_method is not None and hasattr(quant_method, "process_weights_after_loading"):
+                quant_method.process_weights_after_loading(gemm)
 
         gemm.forward(x)  # noqa: F821  # dry run to init
 
         return gemm
-
-    # VllmConfig is identical across gemm cases; build once per worker and
-    # reuse (construction re-scans package entry_points, which is slow).
-    vllm_config = _get_cached_vllm_config(dtype)
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     # Ops per measurement: pack as many as the memory budget allows, capped so
     # tiny shapes don't create an absurd number. Large shapes -> few
