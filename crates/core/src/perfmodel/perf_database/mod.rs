@@ -29,7 +29,7 @@ use crate::operators::util_empirical::{DeltaLookupCache, ProvenanceTier, UtilGri
 /// Keep textually identical to the CANONICAL `_KNOWN_BACKEND_DIRS` in
 /// `python/aisimulate/src/aisimulate_core/sdk/operations/base.py`, which lists
 /// every copy that must stay in sync (Rust cannot import the Python set).
-const KNOWN_BACKEND_DIRS: [&str; 5] = ["trtllm", "sglang", "vllm", "nccl", "oneccl"];
+const KNOWN_BACKEND_DIRS: [&str; 6] = ["trtllm", "sglang", "vllm", "nccl", "oneccl", "hccl"];
 
 /// Test-only compatibility shim over [`SourceResolver::fixed`]'s map
 /// semantics (present-but-empty = veto, absent = default-primary with the
@@ -524,14 +524,14 @@ impl PerfDatabase {
                 system_data_root.display()
             )));
         }
-        // NCCL/OneCCL parquet files live under `<system_data_root>/comm/
-        // {nccl, oneccl}/<version>/` (family-first, preferred) or the legacy
-        // `<system_data_root>/{nccl, oneccl}/<version>/`, NOT under the
+        // NCCL/OneCCL/HCCL parquet files live under `<system_data_root>/comm/
+        // {nccl, oneccl, hccl}/<version>/` (family-first, preferred) or the legacy
+        // `<system_data_root>/{nccl, oneccl, hccl}/<version>/`, NOT under the
         // backend/version data dir — see `comm_root`. The version comes from
-        // `SystemSpec.misc.{nccl,oneccl}_version` and is optional — XPU
-        // systems decl ``oneccl_version`` only, GPU systems typically decl
-        // `nccl_version` only. Mirrors Python
-        // `sdk/operations/communication.py:294, 301-303`.
+        // `SystemSpec.misc.{nccl,oneccl,hccl}_version` and is optional — XPU
+        // systems decl ``oneccl_version`` only, Ascend NPU systems decl
+        // ``hccl_version`` only, GPU systems typically decl `nccl_version` only.
+        // Mirrors Python `sdk/operations/communication.py`.
         let nccl_root = spec
             .misc
             .nccl_version
@@ -542,12 +542,17 @@ impl PerfDatabase {
             .oneccl_version
             .as_ref()
             .map(|v| comm_root(&system_data_root, "oneccl", v));
+        let hccl_root = spec
+            .misc
+            .hccl_version
+            .as_ref()
+            .map(|v| comm_root(&system_data_root, "hccl", v));
         let tables = PerfTables {
             system: system.to_string(),
             backend: backend.to_string(),
             version: version.to_string(),
             // Every op table resolves its own file basenames through the
-            // resolver via `with_sources` (shared-layer aware). NCCL/OneCCL
+            // resolver via `with_sources` (shared-layer aware). NCCL/OneCCL/HCCL
             // are framework-agnostic and never inherit siblings, so their
             // roots stay as the direct system-wide dirs.
             gemm: GemmTable::with_sources(data_root.clone(), spec.clone(), &resolver)?,
@@ -564,10 +569,11 @@ impl PerfDatabase {
                 spec.clone(),
                 &resolver,
             )?,
-            communication: CommunicationTable::with_sources(
+            communication: CommunicationTable::with_sources_and_hccl(
                 data_root.clone(),
                 nccl_root,
                 oneccl_root,
+                hccl_root,
                 &resolver,
             )?,
             dsa: DsaTable::with_sources(data_root.clone(), &resolver)?.with_backend(backend),

@@ -63,7 +63,7 @@ def _resolve_perf_data_path(perf_file: str) -> str:
 #   aic-core/rust/aiconfigurator-core/src/perf_database/mod.rs (KNOWN_BACKEND_DIRS)
 # (tools/perf_database/perf_data_layout.py's LEGACY_BACKEND_DIRS is a
 # deliberate 3-entry variant — consumer backends only, no comm pseudo-backends.)
-_KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
+_KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl", "hccl"})
 
 
 def _version_dir_is_partial(version_dir: str) -> bool:

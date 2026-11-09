@@ -38,6 +38,7 @@ node:
 
 # TODO fix this with hccl, use for memory usage computation
 misc:
+  hccl_version: '9.2.0'
   nccl_mem: # TODO post-MVP zeros mean HCCL comm-buffer overhead is unmeasured, not absent
     1: 0
     2: 0

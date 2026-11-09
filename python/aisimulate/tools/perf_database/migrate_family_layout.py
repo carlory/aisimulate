@@ -55,7 +55,7 @@ logger = logging.getLogger("migrate_family_layout")
 # Textually identical to the CANONICAL _KNOWN_BACKEND_DIRS in
 # src/aisimulate_core/sdk/operations/base.py, which lists every
 # copy that must stay in sync (this standalone tool cannot import aic-core).
-KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
+KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl", "hccl"})
 
 SHARED_LAYER_REUSE = "SHARED_LAYER_REUSE.txt"
 INCOMPLETE = "INCOMPLETE.txt"

@@ -23,6 +23,7 @@ def test_network_collectors_are_grouped_under_network_folder():
         NETWORK_ROOT / "collect_comm.sh",
         NETWORK_ROOT / "collect_nccl.py",
         NETWORK_ROOT / "collect_oneccl_xpu.py",
+        NETWORK_ROOT / "collect_hccl.py",
         NETWORK_ROOT / "collect_all_reduce.py",
         NETWORK_ROOT / "slurm" / "collect_allreduce.py",
         NETWORK_ROOT / "slurm" / "collect_trtllm_alltoall.py",
@@ -37,6 +38,7 @@ def test_network_collectors_are_grouped_under_network_folder():
         COLLECTOR_ROOT / "collect_comm.sh",
         COLLECTOR_ROOT / "collect_nccl.py",
         COLLECTOR_ROOT / "collect_oneccl_xpu.py",
+        COLLECTOR_ROOT / "collect_hccl.py",
         COLLECTOR_ROOT / "collect_all_reduce.py",
         COLLECTOR_ROOT / "slurm_comm_collector",
     ]

@@ -27,7 +27,7 @@ DATA_ROOT = REPO_ROOT / "src" / "aisimulate_core" / "systems" / "data"
 MODEL_CONFIG_DIR = REPO_ROOT / "src" / "aisimulate_core" / "model_configs"
 
 # Non-engine data dirs living next to backend dirs in the data tree.
-NON_ENGINE_BACKENDS = {"nccl", "oneccl"}
+NON_ENGINE_BACKENDS = {"nccl", "oneccl", "hccl"}
 METADATA_FILES = {"SHARED_LAYER_REUSE.txt", "INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"}
 
 

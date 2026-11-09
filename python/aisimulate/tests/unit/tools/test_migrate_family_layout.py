@@ -89,6 +89,7 @@ class TestFamilyForTable:
         assert mod.family_for_table("gemm_perf", family_map) == "gemm"
         assert mod.family_for_table("nccl_perf", family_map) == "comm"
         assert mod.family_for_table("oneccl_perf", family_map) == "comm"
+        assert mod.family_for_table("hccl_perf", family_map) == "comm"
 
     def test_unknown_table_raises(self, mod, family_map):
         with pytest.raises(mod.MigrationError, match="mystery_perf"):
@@ -116,6 +117,10 @@ class TestPlanTableMove:
     def test_pseudo_backend_oneccl(self, mod, family_map):
         mv = mod.plan_table_move("b60", "oneccl", "2021.11", "oneccl_perf.parquet", family_map)
         assert mv.dst == Path("b60/comm/oneccl/2021.11/oneccl_perf.parquet")
+
+    def test_pseudo_backend_hccl(self, mod, family_map):
+        mv = mod.plan_table_move("ascend_950dt", "hccl", "9.2.0", "hccl_perf.parquet", family_map)
+        assert mv.dst == Path("ascend_950dt/comm/hccl/9.2.0/hccl_perf.parquet")
 
     def test_unknown_table_raises(self, mod, family_map):
         with pytest.raises(mod.MigrationError):

@@ -142,6 +142,12 @@ pub struct MiscSpec {
     /// Python `sdk/operations/communication.py:301-303`.
     #[serde(default)]
     pub oneccl_version: Option<String>,
+    /// HCCL version string used during data collection. Set on Ascend NPU
+    /// systems (e.g. `ascend_950dt`) where Huawei HCCL is the comm backend; the
+    /// corresponding `hccl_perf.parquet` lives under
+    /// `<systems_root>/<data_dir>/comm/hccl/<hccl_version>/`.
+    #[serde(default)]
+    pub hccl_version: Option<String>,
 }
 
 fn default_mem_bw_scaling() -> f64 {

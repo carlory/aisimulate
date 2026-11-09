@@ -62,7 +62,11 @@ const COMM_FAMILY_DIR: &str = "comm";
 const FRAMEWORK_VERSIONED_COMM_BACKENDS: [&str; 3] = ["sglang", "trtllm", "vllm"];
 /// Framework-agnostic comm tables: never inherit siblings (table-identity
 /// guard, independent of path discovery).
-const FRAMEWORK_AGNOSTIC_BASENAMES: [&str; 2] = ["nccl_perf.parquet", "oneccl_perf.parquet"];
+const FRAMEWORK_AGNOSTIC_BASENAMES: [&str; 3] = [
+    "nccl_perf.parquet",
+    "oneccl_perf.parquet",
+    "hccl_perf.parquet",
+];
 const REUSE_ENTRY_REQUIRED_KEYS: [&str; 4] = ["table", "from_version", "reason", "approved_by"];
 
 fn perf_err(msg: String) -> AicError {

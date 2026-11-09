@@ -2242,11 +2242,11 @@ class _LazySupportMatrix:
             from aisimulate_core.sdk.operations.communication import NCCL
 
             NCCL.load_data(db)
-            # vllm matrix prefers ``_nccl_data`` but falls back to ``_oneccl_data``
+            # vllm matrix prefers ``_nccl_data`` but falls back to ``_oneccl_data`` / ``_hccl_data``
             # because the original code used ``... or getattr(self, "_oneccl_data", None)``.
             primary = getattr(db, "_nccl_data", None)
             if db.backend == "vllm" and not primary:
-                primary = getattr(db, "_oneccl_data", None)
+                primary = getattr(db, "_oneccl_data", None) or getattr(db, "_hccl_data", None)
             return _enum_key_names(primary)
 
         if key == "moe":
@@ -2647,7 +2647,11 @@ class PerfDatabase:
                 ),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
-                "nccl": _enum_key_names(getattr(self, "_nccl_data", None) or getattr(self, "_oneccl_data", None)),
+                "nccl": _enum_key_names(
+                    getattr(self, "_nccl_data", None)
+                    or getattr(self, "_oneccl_data", None)
+                    or getattr(self, "_hccl_data", None)
+                ),
             }
         else:
             self.supported_quant_mode = {}

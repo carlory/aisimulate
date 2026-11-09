@@ -285,6 +285,12 @@ impl Availability<'_> {
                 .oneccl_root()
                 .map(|root| vec![PerfSource(root.join(name), None)])
                 .unwrap_or_default(),
+            "hccl_perf.parquet" => self
+                .db
+                .communication
+                .hccl_root()
+                .map(|root| vec![PerfSource(root.join(name), None)])
+                .unwrap_or_default(),
             "dsv4_megamoe_module_perf.parquet" => {
                 vec![PerfSource(
                     self.db.dsv4_megamoe.primary_path().to_owned(),
@@ -667,13 +673,13 @@ impl Availability<'_> {
                         DatabaseMode::Silicon | DatabaseMode::Hybrid
                     )
                 {
-                    self.any(&["nccl_perf.parquet", "oneccl_perf.parquet"])
+                    self.any(&["nccl_perf.parquet", "oneccl_perf.parquet", "hccl_perf.parquet"])
                 } else {
                     self.any(&["custom_allreduce_perf.parquet"])
                 }
             }
             Nccl(comm) if comm.num_gpus > 1 => {
-                self.any(&["nccl_perf.parquet", "oneccl_perf.parquet"])
+                self.any(&["nccl_perf.parquet", "oneccl_perf.parquet", "hccl_perf.parquet"])
             }
             // Dispatch chooses its comm legs from topology at query time. A
             // single-rank graph needs no communication table.
@@ -682,6 +688,7 @@ impl Availability<'_> {
                     "custom_allreduce_perf.parquet",
                     "nccl_perf.parquet",
                     "oneccl_perf.parquet",
+                    "hccl_perf.parquet",
                     "trtllm_alltoall_perf.parquet",
                 ])
             }

@@ -60,7 +60,7 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 # subtrees). Keep textually identical to the CANONICAL _KNOWN_BACKEND_DIRS in
 # src/aisimulate_core/sdk/operations/base.py, which lists every
 # copy that must stay in sync (this standalone tool cannot import aic-core).
-_KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl"}
+_KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl", "hccl"}
 
 
 def _dir_is_incomplete(path: str) -> bool:
@@ -606,7 +606,8 @@ def main():
 
             # Legacy data/<system>/nccl/<nccl_version>/nccl_perf.parquet
             # Legacy data/<system>/oneccl/<oneccl_version>/oneccl_perf.parquet
-            if backend in ("nccl", "oneccl"):
+            # Legacy data/<system>/hccl/<hccl_version>/hccl_perf.parquet
+            if backend in ("nccl", "oneccl", "hccl"):
                 # Ignore for now
                 continue
 
@@ -632,7 +633,8 @@ def main():
 
             # data/<system>/<family>/nccl/<nccl_version>/nccl_perf.parquet
             # data/<system>/<family>/oneccl/<oneccl_version>/oneccl_perf.parquet
-            if backend in ("nccl", "oneccl"):
+            # data/<system>/<family>/hccl/<hccl_version>/hccl_perf.parquet
+            if backend in ("nccl", "oneccl", "hccl"):
                 # Ignore for now
                 continue
 

@@ -82,6 +82,7 @@ VIEW_KEY_LAYERS: dict[str, tuple[KeyConverter, ...]] = {
     "_custom_allreduce_data": (_COMM_Q, _int, _str, _int),
     "_nccl_data": (_COMM_Q, _str, _int, _int),
     "_oneccl_data": (_COMM_Q, _str, _int, _int),
+    "_hccl_data": (_COMM_Q, _str, _int, _int),
     "_context_dsa_module_data": (_FMHA_Q, _KV_Q, _GEMM_Q, _str, _str, _int, _int, _int, _int),
     "_context_dsa_module_skip_data": (_FMHA_Q, _KV_Q, _GEMM_Q, _str, _str, _int, _int, _int, _int),
     "_generation_dsa_module_data": (_KV_Q, _GEMM_Q, _str, _str, _int, _int, _int),

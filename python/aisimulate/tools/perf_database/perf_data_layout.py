@@ -20,7 +20,7 @@ META_COLUMNS = frozenset({"framework", "version", "device", "op_name", "kernel_s
 SKIP_FILE_BASENAMES = frozenset({"INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"})
 
 # Framework-agnostic communication backends are not cross-backend reuse inputs.
-SKIP_BACKEND_DIRS = frozenset({"nccl", "oneccl"})
+SKIP_BACKEND_DIRS = frozenset({"nccl", "oneccl", "hccl"})
 
 # First-level backend dirs in the legacy <system>/<backend>/<version> layout.
 # Keep this set textually identical to the canonical _KNOWN_BACKEND_DIRS in

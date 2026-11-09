@@ -2397,6 +2397,7 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("_custom_allreduce_data", &["custom_allreduce_perf.parquet"]),
     ("_nccl_data", &["nccl_perf.parquet"]),
     ("_oneccl_data", &["oneccl_perf.parquet"]),
+    ("_hccl_data", &["hccl_perf.parquet"]),
     (
         "_context_dsa_module_data",
         &["dsa_context_module_perf.parquet"],
@@ -2541,6 +2542,10 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         "_oneccl_data" => view_nccl(&comm_src(
             tables.communication.oneccl_root(),
             "oneccl_perf.parquet",
+        ))?,
+        "_hccl_data" => view_nccl(&comm_src(
+            tables.communication.hccl_root(),
+            "hccl_perf.parquet",
         ))?,
         "_context_dsa_module_data" => {
             view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, false)?
