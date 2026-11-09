@@ -219,8 +219,8 @@ REGISTRY_XPU: list[OpEntry] = [
     ),
 ]
 
-# Ascend NPU (vllm-ascend) lane. Collects gemm (bfloat16 and fp8) and dense
-# attention (context/generation) in eager mode; the `vllm_npu` manifest pin
+# Ascend NPU (vllm-ascend) lane. Collects gemm, dense attention
+# (context/generation) and moe in eager mode; the `vllm_npu` manifest pin
 # resolves these entries, and both must stay in sync (an op entry without its
 # pin is unresolvable, a pin without ops fails `validate_resolution`).
 REGISTRY_NPU: list[OpEntry] = [
@@ -250,6 +250,15 @@ REGISTRY_NPU: list[OpEntry] = [
         run_func="run_attention_torch",
         perf_filename=PerfFile.GENERATION_ATTENTION,
         # Not yet hardware-validated on Ascend 950DT.
+        unverified=True,
+    ),
+    OpEntry(
+        op="moe",
+        module="collector.vllm.collect_moe_npu",
+        get_func="get_moe_test_cases",
+        run_func="run_moe_torch",
+        perf_filename=PerfFile.MOE,
+        # Single-rank BF16 FusedMoE path not yet hardware-validated on Ascend 950DT.
         unverified=True,
     ),
 ]

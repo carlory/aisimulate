@@ -114,6 +114,7 @@ def test_npu_host_selects_the_npu_lane(monkeypatch):
         "collector.vllm.collect_gemm_npu",
         "collector.vllm.collect_attn_npu",
         "collector.vllm.collect_attn_npu",
+        "collector.vllm.collect_moe_npu",
     ]
 
 
