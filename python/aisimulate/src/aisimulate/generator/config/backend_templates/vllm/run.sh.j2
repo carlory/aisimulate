@@ -9,7 +9,14 @@ trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 {% set enable_router = DynConfig.enable_router | default(false) %}
 {% set frontend_args = frontend_extra_args | default('') %}
 {% set kvbm_enabled = (kvbm_env_exports | default([]) | length) > 0 %}
-{% set _device_env = 'ONEAPI_DEVICE_SELECTOR=level_zero:$GPU_LIST' if (NodeConfig.system_name | default('')) == 'b60' else 'CUDA_VISIBLE_DEVICES=$GPU_LIST' %}
+{% set _system_name = NodeConfig.system_name | default('') %}
+{% if _system_name == 'b60' %}
+{% set _device_env = 'ONEAPI_DEVICE_SELECTOR=level_zero:$GPU_LIST' %}
+{% elif _system_name == 'ascend_950dt' or _system_name.startswith('ascend_') %}
+{% set _device_env = 'ASCEND_RT_VISIBLE_DEVICES=$GPU_LIST' %}
+{% else %}
+{% set _device_env = 'CUDA_VISIBLE_DEVICES=$GPU_LIST' %}
+{% endif %}
 {% if enable_router %}
 export PYTHONHASHSEED=0
 {% endif %}

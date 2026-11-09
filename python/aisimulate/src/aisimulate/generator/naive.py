@@ -661,7 +661,8 @@ def build_naive_generator_params(
     # dropping system_name (and any NodeConfig override). Merge the full
     # node_config back so the system identity survives; run.sh reads
     # NodeConfig.system_name to pick the device env var (e.g. B60 needs
-    # ONEAPI_DEVICE_SELECTOR instead of CUDA_VISIBLE_DEVICES).
+    # ONEAPI_DEVICE_SELECTOR and Ascend needs ASCEND_RT_VISIBLE_DEVICES
+    # instead of CUDA_VISIBLE_DEVICES).
     params["NodeConfig"] = _deep_merge_dicts(params.get("NodeConfig", {}), node_config)
     if llmd_config:
         params["LlmdConfig"] = llmd_config

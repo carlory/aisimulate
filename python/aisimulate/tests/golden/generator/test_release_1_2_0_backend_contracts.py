@@ -353,6 +353,27 @@ def test_routed_vllm_run_preserves_frontend_port_and_cache_weights():
     assert '--http-port "9123"' in frontend_line
 
 
+@pytest.mark.parametrize(
+    ("system_name", "expected_env"),
+    [
+        ("h200_sxm", "CUDA_VISIBLE_DEVICES=$GPU_LIST"),
+        ("b60", "ONEAPI_DEVICE_SELECTOR=level_zero:$GPU_LIST"),
+        ("ascend_950dt", "ASCEND_RT_VISIBLE_DEVICES=$GPU_LIST"),
+    ],
+)
+def test_vllm_0_20_1_run_device_env_golden_contract(system_name, expected_env):
+    params = copy.deepcopy(_GOLDEN_PARAMS)
+    params["NodeConfig"]["system_name"] = system_name
+    run_sh = generate_backend_artifacts(
+        params,
+        "vllm",
+        backend_version=_BACKEND_VERSIONS["vllm"],
+        deployment_target="dynamo-j2",
+    )["run_0.sh"]
+
+    assert f"{expected_env} python3 -m dynamo.vllm" in run_sh
+
+
 def test_sglang_0_5_11_cli_args_golden_contract():
     tokens = _split_cli(_render("sglang")["cli_args_agg"])
     flags = _flag_set(tokens)
