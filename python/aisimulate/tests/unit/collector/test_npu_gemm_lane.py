@@ -658,3 +658,43 @@ def test_run_gemm_enables_acl_graph_when_env_flag_is_set(collect_gemm_npu, monke
             "used_cuda_graph": True,
         }
     ]
+
+
+@pytest.mark.parametrize("has_primary_exc", [True, False])
+def test_run_gemm_empty_cache_cleanup_preserves_primary_and_propagates_without_primary(
+    collect_gemm_npu,
+    monkeypatch,
+    caplog,
+    has_primary_exc,
+):
+    """In finally: if a primary exception is active, empty_cache() failure is logged as warning
+    and the primary exception is preserved; if no primary exception is active, empty_cache()
+    failure must propagate and log_perf must not be called in either case.
+    """
+    from contextlib import contextmanager
+
+    logged_calls = []
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 64 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+    device_module.empty_cache.side_effect = RuntimeError("cleanup empty_cache failure")
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        if has_primary_exc:
+            raise RuntimeError("primary gemm kernel failure")
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 32.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_gemm_npu, "setup_distributed", lambda device: None)
+    monkeypatch.setattr(collect_gemm_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged_calls.append(kwargs))
+
+    expected_match = "primary gemm kernel failure" if has_primary_exc else "cleanup empty_cache failure"
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match=expected_match):
+        collect_gemm_npu.run_gemm("bfloat16", 16, 32, 64, perf_filename=PerfFile.GEMM)
+
+    assert logged_calls == []
+    if has_primary_exc:
+        assert "Suppressing secondary empty_cache() failure after primary RuntimeError" in caplog.text

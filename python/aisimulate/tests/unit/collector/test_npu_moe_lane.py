@@ -1143,3 +1143,99 @@ def test_run_moe_torch_handles_out_of_memory_at_first_vs_later_token_counts(coll
         perf_filename=PerfFile.MOE,
     )
     assert logged_tokens == [4]
+
+
+@pytest.mark.parametrize("has_primary_exc", [True, False])
+def test_run_moe_torch_empty_cache_cleanup_and_atomic_log_perf(
+    collect_moe_npu,
+    monkeypatch,
+    caplog,
+    has_primary_exc,
+):
+    """In finally: if a primary exception is active (even on the second token count after the first
+    succeeded), empty_cache() failure is logged as warning, the primary exception is preserved,
+    and log_perf is never called for earlier token counts. If no primary exception is active,
+    empty_cache() failure in finally must propagate and log_perf must not be called.
+    """
+    _install_fake_vllm_ascend_modules(monkeypatch)
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 96 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+    device_module.empty_cache.side_effect = [
+        None,  # pre-allocation empty_cache succeeds
+        RuntimeError("cleanup empty_cache failure on sticky NPU stream"),
+    ]
+
+    class FakeMoERunner:
+        def __init__(self, **_kwargs):
+            self.routed_experts = SimpleNamespace(
+                named_parameters=lambda recurse=False: [],
+                quant_method=None,
+            )
+            self.moe_config = object()
+
+        def to(self, _dev):
+            return self
+
+        def eval(self):
+            pass
+
+        def requires_grad_(self, _flag):
+            pass
+
+        def __call__(self, _hidden_states, _router_logits):
+            pass
+
+    sys.modules["vllm.model_executor.layers.fused_moe.layer"].FusedMoEFactory = FakeMoERunner
+    sys.modules["vllm.forward_context"].get_forward_context.return_value = SimpleNamespace(moe_layer_index=0)
+
+    monkeypatch.setattr(collect_moe_npu, "setup_distributed", lambda _device: None)
+    monkeypatch.setattr(collect_moe_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "power_law_logits_v3",
+        lambda num_tokens, n_exp, _topk, _ep, _alpha: _FakeTensor((num_tokens, n_exp), dtype="float32"),
+    )
+
+    logged_tokens = []
+    monkeypatch.setattr(
+        collect_moe_npu,
+        "log_perf",
+        lambda **kwargs: logged_tokens.append(kwargs["item_list"][0]["num_tokens"]),
+    )
+
+    step = {"n": 0}
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        step["n"] += 1
+        if has_primary_exc and step["n"] == 2:
+            raise ValueError("primary moe kernel failure at second token count")
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 5.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_moe_npu, "benchmark_with_power", fake_benchmark)
+
+    expected_exc = ValueError if has_primary_exc else RuntimeError
+    expected_match = (
+        "primary moe kernel failure at second token count"
+        if has_primary_exc
+        else "cleanup empty_cache failure on sticky NPU stream"
+    )
+    with caplog.at_level("WARNING"), pytest.raises(expected_exc, match=expected_match):
+        collect_moe_npu.run_moe_torch(
+            "bfloat16",
+            [4, 16],
+            2048,
+            768,
+            8,
+            128,
+            1,
+            1,
+            "Qwen/Qwen3-30B-A3B",
+            perf_filename=PerfFile.MOE,
+        )
+
+    assert logged_tokens == []
+    if has_primary_exc:
+        assert "Suppressing secondary empty_cache() failure after primary ValueError" in caplog.text

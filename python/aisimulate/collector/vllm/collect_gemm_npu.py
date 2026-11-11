@@ -18,6 +18,7 @@ and the version axis of the parquet directory (manifest key ``vllm_npu``).
 __compat__ = "vllm_ascend==0.30.0rc2"
 
 import importlib.metadata as im
+import logging
 import os
 import sys
 
@@ -313,6 +314,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
     outside_loop_count = max(1, min(_MAX_OPS_PER_LOOP, mem_cap))
 
     op_list = []
+    primary_exc: BaseException | None = None
     try:
         for i in range(outside_loop_count):
             op_list.append(create_gemm())
@@ -334,6 +336,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
             allow_graph_fail=False,
         ) as results:
             pass
+    except BaseException as exc:
+        primary_exc = exc
+        raise
     finally:
         # Free device weights after each case; a packed op_list left cached
         # OOMs later shapes.
@@ -342,7 +347,18 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
         import gc
 
         gc.collect()
-        get_device_module(device).empty_cache()
+        try:
+            get_device_module(device).empty_cache()
+        except Exception as cleanup_exc:
+            if primary_exc is None:
+                raise
+            logging.getLogger(__name__).warning(
+                "Suppressing secondary empty_cache() failure after primary %s: %s",
+                type(primary_exc).__name__,
+                cleanup_exc,
+            )
+        finally:
+            primary_exc = None
 
     # torch_npu 2.10.0.post7 API notes (read from the pinned image's own
     # wheel): get_device_name validates the ordinal and returns the SoC model

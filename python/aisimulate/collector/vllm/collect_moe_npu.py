@@ -45,6 +45,7 @@ __compat__ = "vllm_ascend==0.30.0rc2"
 import contextlib
 import gc
 import importlib.metadata as im
+import logging
 from types import SimpleNamespace
 
 import torch
@@ -508,6 +509,7 @@ def run_moe_torch(
     moe_module = None
     routed_experts = None
     comm_impl = None
+    primary_exc: BaseException | None = None
     try:
         with (
             set_current_vllm_config(vllm_config),
@@ -563,6 +565,7 @@ def run_moe_torch(
             # in collector/kernel_source_backends.yaml) until on-device Ascend 950DT
             # campaigns trace and register the exact Ascend MoE kernel labels.
             source = "vllm_default"
+            pending_perf_items = []
 
             with _scoped_extra_ctx(_EXTRA_CTX):
                 for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
@@ -633,37 +636,53 @@ def run_moe_torch(
                         del hidden_states, router_logits_list
 
                     latency = results["latency_ms"] / num_iter
-
-                    log_perf(
-                        item_list=[
-                            {
-                                "moe_dtype": moe_type,
-                                "num_tokens": num_tokens,
-                                "hidden_size": hidden_size,
-                                "inter_size": inter_size,
-                                "topk": topk,
-                                "num_experts": num_experts,
-                                "moe_tp_size": moe_tp_size,
-                                "moe_ep_size": moe_ep_size,
-                                "distribution": (
-                                    "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed
-                                ),
-                                "latency": latency,
-                            }
-                        ],
-                        framework="VLLM",
-                        version=vllm_ascend_version,
-                        device_name=device_name,
-                        op_name="moe",
-                        kernel_source=source,
-                        perf_filename=perf_filename,
-                        # No NVML-equivalent on CANN: power is never sampled on this lane.
-                        power_stats=None,
+                    pending_perf_items.append(
+                        {
+                            "moe_dtype": moe_type,
+                            "num_tokens": num_tokens,
+                            "hidden_size": hidden_size,
+                            "inter_size": inter_size,
+                            "topk": topk,
+                            "num_experts": num_experts,
+                            "moe_tp_size": moe_tp_size,
+                            "moe_ep_size": moe_ep_size,
+                            "distribution": (
+                                "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed
+                            ),
+                            "latency": latency,
+                        }
                     )
+    except BaseException as exc:
+        primary_exc = exc
+        raise
     finally:
         del moe_module, routed_experts, comm_impl
         gc.collect()
-        dev_mod.empty_cache()
+        try:
+            dev_mod.empty_cache()
+        except Exception as cleanup_exc:
+            if primary_exc is None:
+                raise
+            logging.getLogger(__name__).warning(
+                "Suppressing secondary empty_cache() failure after primary %s: %s",
+                type(primary_exc).__name__,
+                cleanup_exc,
+            )
+        finally:
+            primary_exc = None
+
+    for perf_item in pending_perf_items:
+        log_perf(
+            item_list=[perf_item],
+            framework="VLLM",
+            version=vllm_ascend_version,
+            device_name=device_name,
+            op_name="moe",
+            kernel_source=source,
+            perf_filename=perf_filename,
+            # No NVML-equivalent on CANN: power is never sampled on this lane.
+            power_stats=None,
+        )
 
 
 if __name__ == "__main__":

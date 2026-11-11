@@ -460,3 +460,113 @@ def test_run_attention_torch_logs_eager_row_and_passes_ascend_impl_contract(
         }
     ]
     device_module.get_device_capability.assert_not_called()
+
+
+@pytest.mark.parametrize("has_primary_exc", [True, False])
+def test_run_attention_torch_empty_cache_cleanup_preserves_primary_and_propagates_without_primary(
+    collect_attn_npu,
+    monkeypatch,
+    caplog,
+    has_primary_exc,
+):
+    """When a kernel raises a sticky NPU error (e.g. 507015), dev_mod.empty_cache() in finally
+    must log a warning and preserve the primary exception; when no primary exception is active,
+    an empty_cache() failure in finally must propagate and log_perf must not be called.
+    """
+    logged_calls = []
+    device_module = MagicMock()
+    device_module.get_device_properties.return_value.total_memory = 96 * 2**30
+    device_module.get_device_name.return_value = "Ascend950DT"
+    device_module.empty_cache.side_effect = [
+        None,  # pre-allocation empty_cache succeeds
+        RuntimeError("secondary empty_cache failure on sticky NPU stream"),
+    ]
+
+    class FakeBackend:
+        forward_includes_kv_cache_update = True
+
+        @staticmethod
+        def get_name():
+            return "CUSTOM"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [128]
+
+        @staticmethod
+        def get_builder_cls():
+            return lambda *_a, **_kw: SimpleNamespace(build=lambda **_b: SimpleNamespace(slot_mapping=None))
+
+        @staticmethod
+        def get_impl_cls():
+            def _forward(*_a, **_k):
+                if has_primary_exc:
+                    raise RuntimeError("primary kernel failure: error code is 507015")
+                return None
+
+            return lambda **_kw: SimpleNamespace(forward=_forward)
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 1.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_attn_npu, "setup_distributed", lambda device: None)
+    monkeypatch.setattr(collect_attn_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_attn_npu, "_select_attn_backend_cls", lambda **_kw: FakeBackend)
+    monkeypatch.setattr(collect_attn_npu, "framework_kv_block_size", lambda _cls: 128)
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_vllm_config",
+        lambda **kw: SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=128, num_gpu_blocks=8192),
+            model_config=SimpleNamespace(get_sliding_window=lambda: 128),
+        ),
+    )
+    monkeypatch.setattr(collect_attn_npu, "create_standard_kv_cache_spec", lambda *_a, **_kw: SimpleNamespace())
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_common_attn_metadata",
+        lambda bs, _blk, _dev: SimpleNamespace(
+            query_start_loc=_FakeTensor((len(bs.seq_lens) + 1,)),
+            query_start_loc_cpu=_FakeTensor((len(bs.seq_lens) + 1,)),
+            seq_lens=_FakeTensor((len(bs.seq_lens),)),
+            seq_lens_cpu_upper_bound=_FakeTensor((len(bs.seq_lens),)),
+            num_reqs=len(bs.seq_lens),
+            num_actual_tokens=sum(bs.query_lens),
+            max_query_len=max(bs.query_lens),
+            max_seq_len=max(bs.seq_lens),
+            block_table_tensor=_FakeTensor((len(bs.seq_lens), 1)),
+            slot_mapping=_FakeTensor((sum(bs.query_lens),)),
+        ),
+    )
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_kv_cache_and_block_mappings",
+        lambda **_kw: (("k", "v"), SimpleNamespace(numel=lambda: 0)),
+    )
+    monkeypatch.setattr(collect_attn_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_attn_npu, "log_perf", lambda **kwargs: logged_calls.append(kwargs))
+
+    expected_match = (
+        "primary kernel failure: error code is 507015"
+        if has_primary_exc
+        else "secondary empty_cache failure on sticky NPU stream"
+    )
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match=expected_match):
+        collect_attn_npu.run_attention_torch(
+            2,
+            16,
+            2,
+            1,
+            64,
+            False,
+            True,
+            128,
+            True,
+            perf_filename=PerfFile.CONTEXT_ATTENTION,
+        )
+
+    assert logged_calls == []
+    if has_primary_exc:
+        assert "Suppressing secondary empty_cache() failure after primary RuntimeError" in caplog.text

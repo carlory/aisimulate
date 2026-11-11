@@ -27,6 +27,7 @@ __compat__ = "vllm_ascend==0.30.0rc2"
 
 import importlib.metadata as im
 import inspect
+import logging
 import os
 
 import torch
@@ -502,6 +503,7 @@ def run_attention_torch(
             output,  # noqa: F821
         )
 
+    primary_exc: BaseException | None = None
     try:
         with benchmark_with_power(
             device=device,
@@ -516,11 +518,25 @@ def run_attention_torch(
             allow_graph_fail=False,
         ) as results:
             pass
+    except BaseException as exc:
+        primary_exc = exc
+        raise
     finally:
         del query_vllm, key_vllm, value_vllm, kv_cache, output
         del all_q_vllm, all_k_vllm, all_v_vllm, k_contexts, v_contexts
         gc.collect()
-        dev_mod.empty_cache()
+        try:
+            dev_mod.empty_cache()
+        except Exception as cleanup_exc:
+            if primary_exc is None:
+                raise
+            logging.getLogger(__name__).warning(
+                "Suppressing secondary empty_cache() failure after primary %s: %s",
+                type(primary_exc).__name__,
+                cleanup_exc,
+            )
+        finally:
+            primary_exc = None
 
     latency = results["latency_ms"]
 
