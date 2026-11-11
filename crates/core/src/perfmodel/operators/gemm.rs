@@ -893,6 +893,10 @@ mod tests {
             query_gemm_table(&db, GemmQuantMode::Nvfp4, 512, 4096, 4096),
             Err(AicError::MissingSystemFlops(_))
         ));
+        assert!(matches!(
+            query_gemm_table(&db, GemmQuantMode::Mxfp4, 512, 4096, 4096),
+            Err(AicError::MissingSystemFlops(_))
+        ));
     }
 
     #[test]
@@ -904,6 +908,13 @@ mod tests {
         let fp8_op = GemmOp::new("w-fp8", 1024, 4096, GemmQuantMode::Fp8);
         // fp8 memory factor is 1.0.
         assert_eq!(fp8_op.weights_bytes(), 1024.0 * 4096.0 * 1.0);
+
+        let mxfp4_op = GemmOp::new("w-mxfp4", 1024, 4096, GemmQuantMode::Mxfp4);
+        let nvfp4_op = GemmOp::new("w-nvfp4", 1024, 4096, GemmQuantMode::Nvfp4);
+        // mxfp4 memory factor is 0.5 (distinct from nvfp4's 9/16).
+        assert_eq!(mxfp4_op.weights_bytes(), 1024.0 * 4096.0 * 0.5);
+        assert_eq!(nvfp4_op.weights_bytes(), 1024.0 * 4096.0 * (9.0 / 16.0));
+        assert_ne!(mxfp4_op.weights_bytes(), nvfp4_op.weights_bytes());
     }
 
     /// ENERGY oracle for the fp8_static composition on synthetic

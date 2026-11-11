@@ -600,6 +600,7 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "nvfp4" => Nvfp4,
         "nvfp4_wo" => Nvfp4Wo,
         "w4a16_nvfp4" => W4a16Nvfp4,
+        "mxfp4" => Mxfp4,
         _ => return None,
     })
 }
@@ -1007,6 +1008,36 @@ mod tests {
             table
                 .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
                 .is_err()
+        );
+        assert_eq!(query_cache_len(&table), 1);
+    }
+
+    #[test]
+    fn mxfp4_and_nvfp4_are_distinct_gemm_table_identities() {
+        use crate::perf_database::energy_test_fixtures::{Col, energy_test_spec, write_parquet};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["mxfp4", "mxfp4"]),
+                Col::I64("m", vec![128, 256]),
+                Col::I64("n", vec![1024, 1024]),
+                Col::I64("k", vec![1024, 1024]),
+                Col::F64("latency", vec![1.25, 2.5]),
+            ],
+        );
+
+        let mut spec = energy_test_spec();
+        spec.gpu.fp4_tc_flops = Some(1.0e15);
+        let table = GemmTable::new(tmp.path().to_path_buf(), spec);
+        let mxfp4 = table
+            .query(GemmQuantMode::Mxfp4, 128, 1024, 1024)
+            .expect("mxfp4 query must hit its own slice");
+        assert!((mxfp4.latency - 1.25).abs() < 1e-9);
+        assert!(
+            table.query(GemmQuantMode::Nvfp4, 128, 1024, 1024).is_err(),
+            "nvfp4 must not alias mxfp4 rows"
         );
         assert_eq!(query_cache_len(&table), 1);
     }

@@ -465,6 +465,7 @@ fn dtype_str(dt: &crate::DataType) -> &'static str {
         W4a16Mxfp4Cutlass => "w4a16_mxfp4_cutlass",
         W4a16Mxfp4Humming => "w4a16_mxfp4_humming",
         W4a16Nvfp4 => "w4a16_nvfp4",
+        Mxfp4 => "mxfp4",
     }
 }
 
@@ -591,6 +592,7 @@ mod tests {
             ("sq", DataType::Int8, "nvfp4", DataType::Nvfp4),
             ("fp8_ootb", DataType::Fp8, "nvfp4", DataType::Nvfp4),
             ("nvfp4", DataType::Nvfp4, "int4_wo", DataType::Int4),
+            ("mxfp4", DataType::Mxfp4, "int4_wo", DataType::Int4),
         ] {
             let mut req = python_forwarding_request();
             req.cuda_graph_reserved_bytes = 0;

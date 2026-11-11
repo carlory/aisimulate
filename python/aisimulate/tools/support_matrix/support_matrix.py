@@ -66,7 +66,7 @@ SUPPORT_MATRIX_HEADER_WITH_SOURCE = SUPPORT_MATRIX_BASE_HEADER + ["Command", "So
 SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_HEADER_WITH_SOURCE + ["ImageHeight", "ImageWidth", "NumImages"]
 _BYTES_PER_PARAM = 2
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
-_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
+_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4", "mxfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
 

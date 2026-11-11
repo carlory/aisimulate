@@ -235,6 +235,7 @@ pub enum GemmQuantMode {
     Nvfp4,
     Nvfp4Wo,
     W4a16Nvfp4,
+    Mxfp4,
 }
 
 impl GemmQuantMode {
@@ -305,6 +306,12 @@ impl GemmQuantMode {
                 compute: 1.0,
                 name: "w4a16_nvfp4",
                 compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Mxfp4 => QuantMapping {
+                memory: 0.5,
+                compute: 4.0,
+                name: "mxfp4",
+                compute_dtype: Some(ComputeDtype::Fp4),
             },
         }
     }
@@ -736,6 +743,33 @@ mod tests {
                 compute_dtype: Some(ComputeDtype::Fp4)
             }
         );
+        assert_eq!(
+            GemmQuantMode::Mxfp4.mapping(),
+            QuantMapping {
+                memory: 0.5,
+                compute: 4.0,
+                name: "mxfp4",
+                compute_dtype: Some(ComputeDtype::Fp4)
+            }
+        );
+    }
+
+    #[test]
+    fn mxfp4_gemm_wire_identity_is_additive() {
+        let mode: GemmQuantMode = serde_json::from_str("\"mxfp4\"").unwrap();
+        assert_eq!(mode, GemmQuantMode::Mxfp4);
+        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"mxfp4\"");
+        // Historical positional discriminants must remain stable.
+        assert_eq!(
+            bincode::serialize(&GemmQuantMode::W4a16Nvfp4).unwrap(),
+            10_u32.to_le_bytes()
+        );
+        assert_eq!(
+            bincode::serialize(&GemmQuantMode::Mxfp4).unwrap(),
+            11_u32.to_le_bytes()
+        );
+        let bytes = bincode::serialize(&mode).unwrap();
+        assert_eq!(bincode::deserialize::<GemmQuantMode>(&bytes).unwrap(), mode);
     }
 
     #[test]

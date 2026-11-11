@@ -70,6 +70,121 @@ class TestPerfDatabaseConsumption:
             assert table[m][n][k]["latency"] == SYNTHETIC_LATENCY_MS
 
 
+class TestMixedQuantMxfp4ConsumerContract:
+    """Verify mixed BF16/FP8/MXFP8(fp8_block)/MXFP4(mxfp4) GEMM table consumption,
+    weight byte sizing, and query behavior without aliasing mxfp4 to nvfp4."""
+
+    def test_mxfp4_enum_identity_and_weights_distinct_from_nvfp4(self) -> None:
+        assert common.GEMMQuantMode.mxfp4.value == common.QuantMapping(0.5, 4, "mxfp4", "fp4")
+        assert common.GEMMQuantMode.nvfp4.value == common.QuantMapping(9 / 16, 4, "nvfp4", "fp4")
+        assert common.GEMMQuantMode.mxfp4 is not common.GEMMQuantMode.nvfp4
+
+        mxfp4_op = GEMM("mxfp4_gemm", 1.0, 4096, 4096, common.GEMMQuantMode.mxfp4)
+        nvfp4_op = GEMM("nvfp4_gemm", 1.0, 4096, 4096, common.GEMMQuantMode.nvfp4)
+        assert mxfp4_op._quant_mode is common.GEMMQuantMode.mxfp4
+        assert mxfp4_op.get_weights() == 4096 * 4096 * 0.5
+        assert nvfp4_op.get_weights() == 4096 * 4096 * (9 / 16)
+        assert mxfp4_op.get_weights() != nvfp4_op.get_weights()
+
+    def test_mixed_gemm_table_loads_all_four_quants_and_queries_supported_lanes(
+        self,
+        tmp_path,
+    ) -> None:
+        import shutil
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from aisimulate_core.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
+        from aisimulate_core.sdk.perf_database import PerfDatabase
+
+        systems_root = tmp_path / "systems"
+        systems_root.mkdir()
+        repo_systems = (
+            shutil.copy(
+                get_database(SYSTEM, BACKEND, VERSION).systems_root + f"/{SYSTEM}.yaml",
+                systems_root / f"{SYSTEM}.yaml",
+            ),
+        )
+        assert repo_systems
+        gemm_dir = systems_root / "data" / SYSTEM / "gemm" / BACKEND / VERSION
+        gemm_dir.mkdir(parents=True)
+
+        rows = [
+            ("bfloat16", 16, 4096, 4096, 0.020),
+            ("bfloat16", 128, 4096, 4096, 0.120),
+            ("fp8", 16, 4096, 4096, 0.015),
+            ("fp8", 128, 4096, 4096, 0.080),
+            ("fp8_block", 16, 4096, 4096, 0.018),
+            ("fp8_block", 128, 4096, 4096, 0.085),
+            ("mxfp4", 16, 4096, 4096, 0.010),
+            ("mxfp4", 128, 4096, 4096, 0.050),
+        ]
+        pq.write_table(
+            pa.table(
+                {
+                    "framework": ["VLLM"] * len(rows),
+                    "version": [VERSION] * len(rows),
+                    "device": ["Ascend950DT"] * len(rows),
+                    "op_name": ["gemm"] * len(rows),
+                    "kernel_source": ["vllm_default"] * len(rows),
+                    "gemm_dtype": [r[0] for r in rows],
+                    "m": pa.array([r[1] for r in rows], type=pa.int64()),
+                    "n": pa.array([r[2] for r in rows], type=pa.int64()),
+                    "k": pa.array([r[3] for r in rows], type=pa.int64()),
+                    "latency": pa.array([r[4] for r in rows], type=pa.float64()),
+                }
+            ),
+            gemm_dir / "gemm_perf.parquet",
+        )
+
+        GEMM.clear_cache()
+        db = PerfDatabase(SYSTEM, BACKEND, VERSION, systems_root=str(systems_root))
+        expected_modes = {
+            common.GEMMQuantMode.bfloat16,
+            common.GEMMQuantMode.fp8,
+            common.GEMMQuantMode.fp8_block,
+            common.GEMMQuantMode.mxfp4,
+        }
+        assert GEMM.supported_quant_modes(db) == expected_modes
+        assert set(db.supported_quant_mode["gemm"]) == {"bfloat16", "fp8", "fp8_block", "mxfp4"}
+        assert common.GEMMQuantMode.nvfp4 not in db._gemm_data
+        assert db._gemm_data[common.GEMMQuantMode.mxfp4][16][4096][4096]["latency"] == pytest.approx(0.010)
+
+        # Exact queries for BF16, FP8, and MXFP8 (fp8_block) succeed on ascend_950dt.yaml.
+        for mode, expected_latency in [
+            (common.GEMMQuantMode.bfloat16, 0.020),
+            (common.GEMMQuantMode.fp8, 0.015),
+            (common.GEMMQuantMode.fp8_block, 0.018),
+        ]:
+            op = GEMM(f"gemm_{mode.name}", 1.0, 4096, 4096, mode)
+            assert float(op._engine_query(db, x=16)) == pytest.approx(expected_latency)
+
+        # On current ascend_950dt.yaml (fp4_tc_flops intentionally unset), querying mxfp4
+        # fails with MissingSystemFlopsError at query entry rather than KeyError at load time.
+        mxfp4_op = GEMM("gemm_mxfp4", 1.0, 4096, 4096, common.GEMMQuantMode.mxfp4)
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            mxfp4_op._engine_query(db, x=16)
+
+        # When fp4_tc_flops is provided in a separate system spec, mxfp4 queries its own
+        # slice and nvfp4 still misses with PerfDataNotAvailableError (never aliases mxfp4).
+        systems_root_fp4 = tmp_path / "systems_fp4"
+        shutil.copytree(systems_root, systems_root_fp4)
+        spec_path = systems_root_fp4 / f"{SYSTEM}.yaml"
+        spec_path.write_text(
+            spec_path.read_text().replace(
+                "  fp8_tc_flops: 1000000000000000",
+                "  fp8_tc_flops: 1000000000000000\n  fp4_tc_flops: 2000000000000000",
+            )
+        )
+        GEMM.clear_cache()
+        db_with_fp4 = PerfDatabase(SYSTEM, BACKEND, VERSION, systems_root=str(systems_root_fp4))
+        assert float(mxfp4_op._engine_query(db_with_fp4, x=16)) == pytest.approx(0.010)
+        nvfp4_op = GEMM("gemm_nvfp4", 1.0, 4096, 4096, common.GEMMQuantMode.nvfp4)
+        with pytest.raises(PerfDataNotAvailableError):
+            nvfp4_op._engine_query(db_with_fp4, x=16)
+
+
 class TestBackendResolution:
     def test_ascend_resolves_to_the_generic_vllm_backend(self, database) -> None:
         """No sm_version must not mean "Intel B60 fitting"."""

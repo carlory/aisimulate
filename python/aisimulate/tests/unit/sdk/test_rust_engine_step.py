@@ -772,6 +772,33 @@ def test_engine_config_json_preserves_w4a16_nvfp4_weight_and_moe_profiles() -> N
     assert config["moe_dtype"] == "w4a16_nvfp4"
 
 
+def test_engine_config_json_preserves_mxfp4_gemm_distinct_from_nvfp4() -> None:
+    model = SimpleNamespace(
+        model_path="Test/Mxfp4Gemm",
+        architecture="Qwen3ForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=None,
+            moe_ep_size=None,
+            gemm_quant_mode=common.GEMMQuantMode.mxfp4,
+            moe_quant_mode=None,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="ascend_950dt", backend="vllm", version="0.30.0rc2")
+
+    mxfp4_cfg = json.loads(rust_engine_step._engine_config_json(model, database))
+    model.config.gemm_quant_mode = common.GEMMQuantMode.nvfp4
+    nvfp4_cfg = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert mxfp4_cfg["weight_dtype"] == "mxfp4"
+    assert nvfp4_cfg["weight_dtype"] == "nvfp4"
+    assert mxfp4_cfg != nvfp4_cfg
+
+
 def test_engine_config_preserves_distinct_humming_moe_identity():
     model = SimpleNamespace(
         model_path="deepseek-ai/DeepSeek-V4.1-Flash",

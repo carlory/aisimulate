@@ -36,6 +36,7 @@ class GEMMQuantMode(Enum):
     w4a16_nvfp4 = QuantMapping(
         9 / 16, 1, "w4a16_nvfp4", "bfloat16"
     )  # NVFP4 weights + 1 fp8 scale per 16 weights, dequantized into the bf16 MMA lane.
+    mxfp4 = QuantMapping(0.5, 4, "mxfp4", "fp4")  # W4A4 MXFP4 (E2M1 + E8M0 block-32 scales) on FP4 compute lane.
 
 
 class MoEQuantMode(Enum):

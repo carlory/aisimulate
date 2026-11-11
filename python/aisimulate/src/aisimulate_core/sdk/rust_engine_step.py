@@ -1977,6 +1977,8 @@ def _quant_to_dtype(value: Any) -> str | None:
         return "nvfp4"
     if name == "w4a16_nvfp4":
         return "w4a16_nvfp4"
+    if name == "mxfp4":
+        return "mxfp4"
     if name in {"int8", "int8_wo", "sq"}:
         return "int8"
     if name in {

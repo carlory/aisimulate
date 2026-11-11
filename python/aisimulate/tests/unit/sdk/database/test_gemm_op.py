@@ -66,6 +66,8 @@ class TestStaticHelpers:
             common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
         with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
             common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.nvfp4)
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.mxfp4)
 
     def test_get_quant_tc_flops_non_positive_entry_raises(self):
         """A zero/negative entry is a placeholder or a typo: letting it
@@ -94,6 +96,7 @@ class TestStaticHelpers:
         system_spec = {"gpu": {"bfloat16_tc_flops": 2.25e15, "fp8_tc_flops": 4.5e15, "fp4_tc_flops": 1.4e16}}
         assert common.get_quant_tc_flops(system_spec, common.MoEQuantMode.nvfp4) == 1.4e16
         assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.nvfp4) == 1.4e16
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.mxfp4) == 1.4e16
 
 
 class TestLoadData:

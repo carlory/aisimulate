@@ -669,6 +669,7 @@ _GEMM_SOL_DTYPES = {
     "fp8_block": ("fp8_tc_flops", 1.0, 1.0),
     "int8_wo": ("bfloat16_tc_flops", 2.0, 1.0),
     "nvfp4": ("fp4_tc_flops", 0.5, 0.5),
+    "mxfp4": ("fp4_tc_flops", 0.5, 0.5),
 }
 
 _SPEC_CACHE: dict[str, dict | None] = {}
