@@ -89,12 +89,39 @@ class MockAttentionLayer:
         self._v_scale_float = 1.0
 
 
-# The KV pool run_attention_torch allocates: num_gpu_blocks * block_size *
-# num_kv_heads * head_dim * bytes(2) * 2(K+V). Refuse a pool that exceeds the
-# device memory budget before allocating it.
+# The KV pool run_attention_torch allocates: num_gpu_blocks * page_size_bytes
+# (where page_size_bytes == block_size * num_kv_heads * head_dim * dtype_bytes * 2(K+V),
+# matching FullAttentionSpec / SlidingWindowSpec.page_size_bytes in
+# vllm/v1/kv_cache_interface.py:390-416 @ v0.30.0). Refuse a pool that exceeds
+# the device memory budget before allocating it.
 _KV_POOL_BLOCKS = 8192
 _KV_DEFAULT_BLOCK_SIZE = 128
 _KV_POOL_MEM_FRACTION = 0.45
+
+
+def _resolve_kv_pool_blocks(
+    required_blocks: int,
+    page_size_bytes: int,
+    total_memory: int,
+) -> int:
+    """Resolve the KV pool block count for a single-layer benchmark.
+
+    Keeps ``_KV_POOL_BLOCKS`` (8192) when ``required_blocks <= 8192`` and 8192
+    blocks fit within ``_KV_POOL_MEM_FRACTION`` of device memory, caps the
+    synthetic pool to ``allowed // page_size_bytes`` when 8192 blocks would
+    exceed the budget (e.g. 96 KV heads x block_size 128 = 6 MiB/block on a
+    91.75 GiB card), and never returns fewer than ``required_blocks`` (which
+    includes sentinel block 0). When ``required_blocks`` itself exceeds the
+    budget, returning ``required_blocks`` lets ``_kv_pool_does_not_fit`` refuse
+    the case before any KV allocation occurs.
+    """
+    if page_size_bytes <= 0:
+        raise ValueError(f"page_size_bytes must be positive, got {page_size_bytes}")
+    if required_blocks <= 0:
+        raise ValueError(f"required_blocks must be positive, got {required_blocks}")
+    allowed = int(total_memory * _KV_POOL_MEM_FRACTION)
+    budget_blocks = allowed // page_size_bytes
+    return max(min(_KV_POOL_BLOCKS, budget_blocks), int(required_blocks))
 
 
 def _kv_pool_does_not_fit(
@@ -102,9 +129,17 @@ def _kv_pool_does_not_fit(
     head_dim: int,
     total_memory: int,
     block_size: int = _KV_DEFAULT_BLOCK_SIZE,
+    *,
+    num_blocks: int = _KV_POOL_BLOCKS,
+    page_size_bytes: int | None = None,
 ) -> str | None:
     """Why the case's KV pool cannot fit the device, or None when it can."""
-    pool = _KV_POOL_BLOCKS * block_size * num_kv_heads * head_dim * 2 * 2
+    per_block_bytes = (
+        int(page_size_bytes) if page_size_bytes is not None else block_size * num_kv_heads * head_dim * 2 * 2
+    )
+    if per_block_bytes <= 0:
+        raise ValueError(f"per_block_bytes must be positive, got {per_block_bytes}")
+    pool = int(num_blocks) * per_block_bytes
     allowed = int(total_memory * _KV_POOL_MEM_FRACTION)
     if pool <= allowed:
         return None
@@ -378,12 +413,29 @@ def run_attention_torch(
     block_size = _resolve_kv_block_size(backend_cls)
     vllm_config.cache_config.block_size = block_size
 
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, False)
+    if kv_cache_spec.dtype != dtype:
+        raise ValueError(f"kv_cache_spec.dtype ({kv_cache_spec.dtype}) does not match attention dtype ({dtype})")
+    page_size_bytes = int(kv_cache_spec.page_size_bytes)
+
+    # Block 0 is the null sentinel block in create_kv_cache_and_block_mappings.
+    required_blocks = 1 + sum((s_len + block_size - 1) // block_size for s_len in batch_spec.seq_lens)
+    total_memory = dev_mod.get_device_properties(device).total_memory
+    num_blocks = _resolve_kv_pool_blocks(
+        required_blocks=required_blocks,
+        page_size_bytes=page_size_bytes,
+        total_memory=total_memory,
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+
     # Refuse a KV pool that exceeds the device memory budget before allocating it.
     reason = _kv_pool_does_not_fit(
         num_kv_heads,
         head_dim,
-        dev_mod.get_device_properties(device).total_memory,
+        total_memory,
         block_size=block_size,
+        num_blocks=num_blocks,
+        page_size_bytes=page_size_bytes,
     )
     if reason is not None:
         raise RuntimeError(reason)
@@ -392,11 +444,6 @@ def run_attention_torch(
 
     gc.collect()
     dev_mod.empty_cache()
-
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, False)
-
-    required_blocks = 1 + sum((s_len + block_size - 1) // block_size for s_len in batch_spec.seq_lens)
-    num_blocks = max(vllm_config.cache_config.num_gpu_blocks or required_blocks, required_blocks)
 
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
     k_contexts, v_contexts = [], []

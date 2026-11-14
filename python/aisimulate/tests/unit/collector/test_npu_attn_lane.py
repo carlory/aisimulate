@@ -237,15 +237,54 @@ def test_kv_pool_capacity_guard_refuses_oversized_pool():
     nodes = [
         node
         for node in tree.body
-        if (isinstance(node, ast.FunctionDef) and node.name == "_kv_pool_does_not_fit")
+        if (isinstance(node, ast.FunctionDef) and node.name in {"_kv_pool_does_not_fit", "_resolve_kv_pool_blocks"})
         or (isinstance(node, ast.Assign) and node.targets[0].id.startswith("_KV_"))
     ]
     namespace: dict = {}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), MODULE, "exec"), namespace)
     does_not_fit = namespace["_kv_pool_does_not_fit"]
+    resolve_blocks = namespace["_resolve_kv_pool_blocks"]
 
     # At block_size=128, 8 KV heads x hd128 needs 8192 * 128 * 8 * 128 * 4 = 4 GiB.
+    page_8kv = 128 * 8 * 128 * 2 * 2
     assert does_not_fit(8, 128, 96 * 2**30, block_size=128) is None
+    assert resolve_blocks(17, page_8kv, 96 * 2**30) == 8192
+
+    # When required_blocks > 8192 and the budget is sufficient, keep required_blocks.
+    assert resolve_blocks(9000, page_8kv, 96 * 2**30) == 9000
+    assert does_not_fit(8, 128, 96 * 2**30, block_size=128, num_blocks=9000, page_size_bytes=page_8kv) is None
+
+    # On a 91.75 GiB 950DT card (98,515,812,352 B), 96 KV heads x hd128 (6 MiB/block)
+    # cannot hold 8192 blocks (48.0 GiB > 41.2875 GiB), so the default 8192 check refuses,
+    # while _resolve_kv_pool_blocks caps the synthetic pool to 7046 blocks when required_blocks <= 7046.
+    total_950dt = 98_515_812_352
+    page_96kv = 128 * 96 * 128 * 2 * 2  # 6,291,456 B (6 MiB)
+    assert does_not_fit(96, 128, total_950dt, block_size=128) is not None
+    capped_blocks = resolve_blocks(641, page_96kv, total_950dt)
+    assert capped_blocks == 7046
+    assert (
+        does_not_fit(96, 128, total_950dt, block_size=128, num_blocks=capped_blocks, page_size_bytes=page_96kv) is None
+    )
+
+    # Exact boundary: required_blocks == 7046 fits; required_blocks == 7047 exceeds budget and is refused.
+    assert resolve_blocks(7046, page_96kv, total_950dt) == 7046
+    assert does_not_fit(96, 128, total_950dt, block_size=128, num_blocks=7046, page_size_bytes=page_96kv) is None
+    assert resolve_blocks(7047, page_96kv, total_950dt) == 7047
+    reason_over = does_not_fit(96, 128, total_950dt, block_size=128, num_blocks=7047, page_size_bytes=page_96kv)
+    assert reason_over is not None
+    assert reason_over.startswith("FIXME(kernel-limit): does not fit:")
+
+    # Zero or tiny memory budget refuses even a 2-block (sentinel + 1) requirement.
+    assert resolve_blocks(2, page_8kv, 0) == 2
+    reason_zero = does_not_fit(8, 128, 0, block_size=128, num_blocks=2, page_size_bytes=page_8kv)
+    assert reason_zero is not None
+    assert reason_zero.startswith("FIXME(kernel-limit): does not fit:")
+
+    with pytest.raises(ValueError, match="page_size_bytes must be positive"):
+        resolve_blocks(2, 0, total_950dt)
+    with pytest.raises(ValueError, match="required_blocks must be positive"):
+        resolve_blocks(0, page_8kv, total_950dt)
+
     reason = does_not_fit(64, 128, 24 * 2**30, block_size=128)
     assert reason is not None
     assert reason.startswith("FIXME(kernel-limit): does not fit:")
@@ -394,15 +433,17 @@ def test_run_attention_torch_logs_eager_row_and_passes_ascend_impl_contract(
         yield {"latency_ms": 2.5, "used_cuda_graph": False}
 
     monkeypatch.setattr(
-        collect_attn_npu,
-        "setup_distributed",
-        lambda device: observed.setdefault("setup_distributed_device", device),
+        collect_attn_npu, "setup_distributed", lambda device: observed.setdefault("setup_distributed_device", device)
     )
     monkeypatch.setattr(collect_attn_npu, "get_device_module", lambda device=None: device_module)
     monkeypatch.setattr(collect_attn_npu, "_select_attn_backend_cls", lambda **_kw: FakeBackend)
     monkeypatch.setattr(collect_attn_npu, "framework_kv_block_size", lambda _cls: 128)
     monkeypatch.setattr(collect_attn_npu, "create_vllm_config", fake_create_vllm_config)
-    monkeypatch.setattr(collect_attn_npu, "create_standard_kv_cache_spec", lambda *_a, **_kw: SimpleNamespace())
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_standard_kv_cache_spec",
+        lambda *_a, **_kw: SimpleNamespace(dtype="bfloat16", page_size_bytes=128 * 2 * 128 * 2 * 2),
+    )
     monkeypatch.setattr(collect_attn_npu, "create_common_attn_metadata", fake_create_common_metadata)
     monkeypatch.setattr(collect_attn_npu, "create_kv_cache_and_block_mappings", fake_create_kv_cache)
     monkeypatch.setattr(collect_attn_npu, "benchmark_with_power", fake_benchmark)
@@ -523,7 +564,11 @@ def test_run_attention_torch_empty_cache_cleanup_preserves_primary_and_propagate
             model_config=SimpleNamespace(get_sliding_window=lambda: 128),
         ),
     )
-    monkeypatch.setattr(collect_attn_npu, "create_standard_kv_cache_spec", lambda *_a, **_kw: SimpleNamespace())
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_standard_kv_cache_spec",
+        lambda *_a, **_kw: SimpleNamespace(dtype="bfloat16", page_size_bytes=128 * 1 * 64 * 2 * 2),
+    )
     monkeypatch.setattr(
         collect_attn_npu,
         "create_common_attn_metadata",
@@ -570,3 +615,141 @@ def test_run_attention_torch_empty_cache_cleanup_preserves_primary_and_propagate
     assert logged_calls == []
     if has_primary_exc:
         assert "Suppressing secondary empty_cache() failure after primary RuntimeError" in caplog.text
+
+
+def test_run_attention_torch_kv_pool_budget_capping_and_pre_allocation_refusal(
+    collect_attn_npu,
+    monkeypatch,
+):
+    """Verify 96-head cap on 950DT, ceil+sentinel required_blocks, pre-allocation refusal, and dtype check."""
+    allocated_calls = []
+    device_module = MagicMock()
+    # Exact Ascend 950DT total_memory: 98,515,812,352 bytes (45% = 44,332,115,558 bytes -> 7046 blocks at 6 MiB/block)
+    device_module.get_device_properties.return_value.total_memory = 98_515_812_352
+    device_module.get_device_name.return_value = "Ascend950DT_9582"
+
+    class FakeBackend:
+        forward_includes_kv_cache_update = True
+
+        @staticmethod
+        def get_name():
+            return "CUSTOM"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [128]
+
+        @staticmethod
+        def get_builder_cls():
+            return lambda *_a, **_kw: SimpleNamespace(build=lambda **_b: SimpleNamespace(slot_mapping=None))
+
+        @staticmethod
+        def get_impl_cls():
+            return lambda **_kw: SimpleNamespace(
+                do_kv_cache_update=lambda *_a, **_k: None,
+                forward=lambda *_a, **_k: None,
+            )
+
+    @contextmanager
+    def fake_benchmark(**kwargs):
+        kwargs["kernel_func"]()
+        yield {"latency_ms": 1.0, "used_cuda_graph": False}
+
+    monkeypatch.setattr(collect_attn_npu, "setup_distributed", lambda device: None)
+    monkeypatch.setattr(collect_attn_npu, "get_device_module", lambda device=None: device_module)
+    monkeypatch.setattr(collect_attn_npu, "_select_attn_backend_cls", lambda **_kw: FakeBackend)
+    monkeypatch.setattr(collect_attn_npu, "framework_kv_block_size", lambda _cls: 128)
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_vllm_config",
+        lambda **kw: SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=kw["block_size"], num_gpu_blocks=kw["num_gpu_blocks"]),
+            model_config=SimpleNamespace(get_sliding_window=lambda: kw.get("sliding_window")),
+        ),
+    )
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_common_attn_metadata",
+        lambda bs, _blk, _dev: SimpleNamespace(
+            query_start_loc=_FakeTensor((len(bs.seq_lens) + 1,)),
+            query_start_loc_cpu=_FakeTensor((len(bs.seq_lens) + 1,)),
+            seq_lens=_FakeTensor((len(bs.seq_lens),)),
+            seq_lens_cpu_upper_bound=_FakeTensor((len(bs.seq_lens),)),
+            num_reqs=len(bs.seq_lens),
+            num_actual_tokens=sum(bs.query_lens),
+            max_query_len=max(bs.query_lens),
+            max_seq_len=max(bs.seq_lens),
+            block_table_tensor=_FakeTensor((len(bs.seq_lens), 1)),
+            slot_mapping=_FakeTensor((sum(bs.query_lens),)),
+        ),
+    )
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_kv_cache_and_block_mappings",
+        lambda **kw: (allocated_calls.append(kw["num_blocks"]) or ("k", "v"), SimpleNamespace(numel=lambda: 0)),
+    )
+    monkeypatch.setattr(collect_attn_npu, "benchmark_with_power", fake_benchmark)
+    monkeypatch.setattr(collect_attn_npu, "log_perf", lambda **_kw: None)
+
+    # 1. 96 KV heads x hd128 (6 MiB/block): capped from 8192 to 7046 blocks on 950DT
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_standard_kv_cache_spec",
+        lambda vcfg, _fp8: SimpleNamespace(
+            dtype="bfloat16",
+            page_size_bytes=vcfg.cache_config.block_size * 96 * 128 * 2 * 2,
+        ),
+    )
+    collect_attn_npu.run_attention_torch(
+        4,
+        129,  # ceil(129/128) = 2 blocks/seq -> required_blocks = 1 (sentinel) + 4*2 = 9
+        96,
+        96,
+        128,
+        False,
+        True,
+        0,
+        False,
+        perf_filename=PerfFile.CONTEXT_ATTENTION,
+    )
+    assert allocated_calls == [7046]
+
+    # 2. When required_blocks (including sentinel block 0) exceeds 7046, refuse BEFORE allocating Q/K/V or KV cache
+    allocated_calls.clear()
+    collect_attn_npu.torch.randn.reset_mock()
+    # batch_size=7046, input_len=1 -> seq_lens=[1]*7046 -> required_blocks = 1 (sentinel) + 7046*1 = 7047 > 7046
+    with pytest.raises(RuntimeError, match=r"FIXME\(kernel-limit\): does not fit"):
+        collect_attn_npu.run_attention_torch(
+            7046,
+            1,
+            96,
+            96,
+            128,
+            False,
+            True,
+            0,
+            False,
+            perf_filename=PerfFile.CONTEXT_ATTENTION,
+        )
+    assert allocated_calls == []
+    collect_attn_npu.torch.randn.assert_not_called()
+
+    # 3. Mismatched kv_cache_spec.dtype fails loudly instead of silently falling back
+    monkeypatch.setattr(
+        collect_attn_npu,
+        "create_standard_kv_cache_spec",
+        lambda *_a, **_kw: SimpleNamespace(dtype="float8_e4m3fn", page_size_bytes=128 * 8 * 128 * 1 * 2),
+    )
+    with pytest.raises(ValueError, match=r"kv_cache_spec\.dtype .* does not match attention dtype"):
+        collect_attn_npu.run_attention_torch(
+            1,
+            64,
+            8,
+            8,
+            128,
+            False,
+            True,
+            0,
+            False,
+            perf_filename=PerfFile.CONTEXT_ATTENTION,
+        )
