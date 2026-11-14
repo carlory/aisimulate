@@ -160,29 +160,30 @@ class TestMixedQuantMxfp4ConsumerContract:
             op = GEMM(f"gemm_{mode.name}", 1.0, 4096, 4096, mode)
             assert float(op._engine_query(db, x=16)) == pytest.approx(expected_latency)
 
-        # On current ascend_950dt.yaml (fp4_tc_flops intentionally unset), querying mxfp4
-        # fails with MissingSystemFlopsError at query entry rather than KeyError at load time.
+        # On current ascend_950dt.yaml (fp4_tc_flops configured), mxfp4 exact query
+        # succeeds on its own table slice.
         mxfp4_op = GEMM("gemm_mxfp4", 1.0, 4096, 4096, common.GEMMQuantMode.mxfp4)
-        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
-            mxfp4_op._engine_query(db, x=16)
+        assert float(mxfp4_op._engine_query(db, x=16)) == pytest.approx(0.010)
 
-        # When fp4_tc_flops is provided in a separate system spec, mxfp4 queries its own
-        # slice and nvfp4 still misses with PerfDataNotAvailableError (never aliases mxfp4).
-        systems_root_fp4 = tmp_path / "systems_fp4"
-        shutil.copytree(systems_root, systems_root_fp4)
-        spec_path = systems_root_fp4 / f"{SYSTEM}.yaml"
-        spec_path.write_text(
-            spec_path.read_text().replace(
-                "  fp8_tc_flops: 1000000000000000",
-                "  fp8_tc_flops: 1000000000000000\n  fp4_tc_flops: 2000000000000000",
-            )
-        )
-        GEMM.clear_cache()
-        db_with_fp4 = PerfDatabase(SYSTEM, BACKEND, VERSION, systems_root=str(systems_root_fp4))
-        assert float(mxfp4_op._engine_query(db_with_fp4, x=16)) == pytest.approx(0.010)
+        # nvfp4 remains a distinct quant mode and still misses (never aliases mxfp4).
         nvfp4_op = GEMM("gemm_nvfp4", 1.0, 4096, 4096, common.GEMMQuantMode.nvfp4)
         with pytest.raises(PerfDataNotAvailableError):
-            nvfp4_op._engine_query(db_with_fp4, x=16)
+            nvfp4_op._engine_query(db, x=16)
+
+        # Removing fp4_tc_flops from an otherwise identical system spec must restore
+        # the fail-closed guard at query entry.
+        systems_root_no_fp4 = tmp_path / "systems_no_fp4"
+        shutil.copytree(systems_root, systems_root_no_fp4)
+        spec_path = systems_root_no_fp4 / f"{SYSTEM}.yaml"
+        import yaml
+
+        spec = yaml.safe_load(spec_path.read_text())
+        spec["gpu"].pop("fp4_tc_flops", None)
+        spec_path.write_text(yaml.safe_dump(spec, sort_keys=False))
+        GEMM.clear_cache()
+        db_no_fp4 = PerfDatabase(SYSTEM, BACKEND, VERSION, systems_root=str(systems_root_no_fp4))
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            mxfp4_op._engine_query(db_no_fp4, x=16)
 
 
 class TestBackendResolution:

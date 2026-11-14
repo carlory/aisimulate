@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Huawei Ascend 950DT (Atlas A5 generation), 8-card server. npu-smi on the device node reports
-# 8 healthy chips, 98304 MB HBM each and 390W-680W draw (measured 2026-11-06, 28-core bin confirmed:
-# 430 TFLOPS BF16 matmul, 3222 GB/s effective HBM memcpy). Official per-chip specs:
-# Huawei "Ascend 950 NPU Architecture White Paper" (2026) table 3-1 — 4 TB/s HBM on both
-# capacity tiers, 547/486/425 TFLOPS BF16/FP16 and 1 PFLOPS FP8 across the 36/32/28-Cube-Core tiers,
-# 2016 GB/s bidirectional UB IO. INT8/FP32 peaks stay unpublished; the remaining TODO entries below
-# are placeholders for unmeasured fields.
+# 8 healthy chips, 98304 MB HBM each and 390W-680W draw. The 2026-11-14 root-cause probe on
+# Ascend950DT_9582 confirms the 32-Cube-Core / 64-Vector-Core bin at 1650 MHz (runtime properties +
+# CANN platform_config/Ascend950DT_9582.ini), with 430 TFLOPS BF16 matmul and 3222 GB/s effective
+# HBM memcpy measured on-device. Official per-chip specs from Huawei "Ascend 950 NPU Architecture
+# White Paper" (2026) table 3-1: 4 TB/s HBM on both 950DT capacity tiers and 2016 GB/s bidirectional UB IO.
+# INT8/FP32 peaks stay unpublished; the remaining TODO entries below are placeholders for unmeasured fields.
 # As a non-CUDA device, this system declares gpu.vendor explicitly and carries no sm_version.
 
 data_dir: data/ascend_950dt # relative to systems_dir
@@ -18,9 +18,10 @@ gpu:
   mem_empirical_constant_latency: 0.0 # TODO: on-device campaign — no kernel-launch/latency measurement on CANN yet
   mem_capacity: 103079215104 # 96GiB, the official low tier (white paper table 3-1 / table 4-2 "Up to 96/144GB"), observed on the device node; the 144GB tier needs its own entry
   fp32_flops: 34000000000000 # TODO: on-device campaign — no official or third-party FP32 number, conservative bf16/16 placeholder
-  bfloat16_tc_flops: 430000000000000 # 430 TFLOPS measured (bf16 8192×8192 matmul, single card, 2026-11-06); white paper 28-core bin (425 TFLOPS theoretical), not the flagship 36-core (547)
-  int8_tc_flops: 1034000000000000 # TODO: on-device campaign — 1034TOPS is a third-party 36-core figure (unscaled for the measured 430/547 28-core bin, 2026-11-06), shares the FP8 tensor path
-  fp8_tc_flops: 1000000000000000 # 1PFLOPS FP8/MXFP8/HiF8 official 36-core peak (white paper table 3-1; ~2x bf16 ratio vs 28-core 430 TFLOPS measured 2026-11-06). MXFP4 is 2PFLOPS but fp4_tc_flops models nvfp4, left unset
+  bfloat16_tc_flops: 430000000000000 # measured calibration (bf16 8192×8192 matmul, single card); keep as-is for this commit
+  int8_tc_flops: 1034000000000000 # TODO: on-device campaign — 1034TOPS is a third-party 36-core figure, shares the FP8 tensor path
+  fp8_tc_flops: 1000000000000000 # retained for this commit; FP8 nominal-bin correction is tracked separately
+  fp4_tc_flops: 1730000000000000 # white paper table 3-1, 950DT 32-core bin (Ascend950DT_9582) cube-only MXFP4 nominal peak = 1730 TFLOPS
   power: 650 # 650W placeholder; measured range 390W idle - 680W under full load (8-card profiling, 2026-11-03); driver 25.6.rc2 exposes no Power Limit
 
 node:
