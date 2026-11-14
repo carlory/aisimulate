@@ -83,6 +83,44 @@ def _gemm_peak_footprint_bytes(gemm_type: str, m: int, n: int, k: int, copies: i
     return footprint
 
 
+def _mx_scale_to_loader_layout(mx_scale, loader_shape):
+    """Map npu_dynamic_mx_quant E8M0 scales to loader layout (n, ceil(k/32)).
+
+    vllm-ascend's pinned MXFP8 loader contract is a 2-way paired scale tail:
+    source scale bytes are shaped like (n, *, 2) and flattened to width
+    ``2 * ceil(loader_width / 2)`` before trimming the optional odd-width pad.
+    This accepts only that proven contract and fails closed on wider/narrower
+    layouts.
+    """
+    if len(loader_shape) != 2:
+        raise RuntimeError(f"invalid loader_shape={loader_shape}; expected rank-2 (n, ceil(k/32))")
+
+    mx_scale_u8 = mx_scale.view(torch.uint8)
+    mx_shape = tuple(mx_scale_u8.shape)
+    if len(mx_shape) < 2 or mx_shape[-1] != 2:
+        raise RuntimeError(
+            f"invalid mx_scale shape={mx_shape} for loader_shape={loader_shape}; expected trailing paired axis == 2"
+        )
+    if mx_shape[0] != loader_shape[0]:
+        expected_n = loader_shape[0]
+        raise RuntimeError(
+            f"mx_scale leading dim mismatch shape={mx_shape} loader_shape={loader_shape}; expected n == {expected_n}"
+        )
+
+    needed = loader_shape[1]
+    expected_flat_width = 2 * ((needed + 1) // 2)
+    flat = mx_scale_u8.reshape(mx_shape[0], -1)
+    flat_width = flat.shape[1]
+    if flat_width != expected_flat_width:
+        raise RuntimeError(
+            "invalid mx_scale flat width "
+            f"{flat_width} for shape={mx_shape}, loader_shape={loader_shape}; "
+            f"expected {expected_flat_width} (=2*ceil({needed}/2))"
+        )
+
+    return flat[:, :needed].reshape(loader_shape)
+
+
 def get_gemm_test_cases():
     gemm_list = get_gemm_type_specs("vllm_npu")
     if not gemm_list:
@@ -234,7 +272,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="npu:0"):
                     q_weight, mx_scale = mx_quant(raw_weight, dst_type=gemm.weight.dtype)
                     gemm.weight.copy_(q_weight)
                     if hasattr(gemm, "weight_scale"):
-                        gemm.weight_scale.copy_(mx_scale.reshape(gemm.weight_scale.shape).view(torch.uint8))
+                        gemm.weight_scale.copy_(_mx_scale_to_loader_layout(mx_scale, gemm.weight_scale.shape))
                 else:
                     gemm.weight.copy_(raw_weight.to(gemm.weight.dtype))
                     if hasattr(gemm, "weight_scale"):

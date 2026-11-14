@@ -221,6 +221,147 @@ def test_test_cases_expand_bfloat16_fp8_fp8_block_and_mxfp4(collect_gemm_npu):
     ]
 
 
+class _ByteArrayAdapter:
+    """Minimal byte-array tensor adapter for layout tests (no torch dependency)."""
+
+    def __init__(self, data, shape):
+        self._data = list(data)
+        self._shape = tuple(shape)
+        size = 1
+        for dim in self._shape:
+            size *= dim
+        if size != len(self._data):
+            raise ValueError(f"size mismatch: shape={self._shape} requires {size}, got {len(self._data)}")
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def view(self, _dtype):
+        return self
+
+    def reshape(self, *shape):
+        target = shape[0] if len(shape) == 1 and isinstance(shape[0], tuple) else shape
+        target = list(target)
+        unknown = [i for i, d in enumerate(target) if d == -1]
+        if len(unknown) > 1:
+            raise ValueError(f"invalid reshape target={target}")
+        size = len(self._data)
+        known = 1
+        for d in target:
+            if d != -1:
+                known *= d
+        if unknown:
+            if known == 0 or size % known != 0:
+                raise ValueError(f"cannot infer reshape {target} for size {size}")
+            target[unknown[0]] = size // known
+        out_shape = tuple(int(d) for d in target)
+        return _ByteArrayAdapter(self._data, out_shape)
+
+    def __getitem__(self, idx):
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        if len(idx) != len(self._shape):
+            raise TypeError(f"index rank mismatch: idx={idx} shape={self._shape}")
+
+        selectors = []
+        out_shape = []
+        for dim, sel in zip(self._shape, idx, strict=True):
+            if isinstance(sel, slice):
+                start, stop, step = sel.indices(dim)
+                if step != 1:
+                    raise ValueError("step slicing is unsupported")
+                vals = list(range(start, stop, step))
+                selectors.append(vals)
+                out_shape.append(len(vals))
+            elif isinstance(sel, int):
+                if sel < 0:
+                    sel += dim
+                if sel < 0 or sel >= dim:
+                    raise IndexError(sel)
+                selectors.append([sel])
+            else:
+                raise TypeError(type(sel))
+
+        strides = []
+        stride = 1
+        for dim in reversed(self._shape):
+            strides.insert(0, stride)
+            stride *= dim
+
+        out = []
+
+        def walk(axis, offset):
+            if axis == len(selectors):
+                out.append(self._data[offset])
+                return
+            for v in selectors[axis]:
+                walk(axis + 1, offset + v * strides[axis])
+
+        walk(0, 0)
+        return _ByteArrayAdapter(out, tuple(out_shape))
+
+    def rows(self):
+        if len(self._shape) != 2:
+            raise ValueError(f"rows() requires rank-2, got {self._shape}")
+        n, w = self._shape
+        return [self._data[i * w : (i + 1) * w] for i in range(n)]
+
+
+@pytest.mark.parametrize("loader_width", [1, 2, 3, 4])
+def test_mx_scale_to_loader_layout_preserves_expected_bytes_for_k32_k64_k96_k128(collect_gemm_npu, loader_width):
+    n = 2
+    expected_flat_width = 2 * ((loader_width + 1) // 2)
+    paired_groups = expected_flat_width // 2
+    # Deterministic bytes per row: row0 0.., row1 100..
+    data = []
+    for row in range(n):
+        base = row * 100
+        data.extend(range(base, base + expected_flat_width))
+    mx_scale = _ByteArrayAdapter(data, (n, paired_groups, 2))
+
+    collect_gemm_npu.torch.uint8 = object()
+    out = collect_gemm_npu._mx_scale_to_loader_layout(mx_scale, (n, loader_width))
+
+    assert out.shape == (n, loader_width)
+    assert out.rows() == [
+        list(range(0, loader_width)),
+        list(range(100, 100 + loader_width)),
+    ]
+
+
+def test_mx_scale_to_loader_layout_rejects_rank_mismatch_or_nonpaired_tail(collect_gemm_npu):
+    collect_gemm_npu.torch.uint8 = object()
+
+    with pytest.raises(RuntimeError, match=r"loader_shape=\(2, 3, 1\).+rank-2"):
+        collect_gemm_npu._mx_scale_to_loader_layout(_ByteArrayAdapter(range(8), (2, 2, 2)), (2, 3, 1))
+
+    with pytest.raises(RuntimeError, match=r"shape=\(2, 1, 3\).+loader_shape=\(2, 2\).+axis == 2"):
+        collect_gemm_npu._mx_scale_to_loader_layout(_ByteArrayAdapter(range(6), (2, 1, 3)), (2, 2))
+
+
+def test_mx_scale_to_loader_layout_rejects_leading_dim_mismatch(collect_gemm_npu):
+    collect_gemm_npu.torch.uint8 = object()
+    with pytest.raises(RuntimeError, match=r"shape=\(3, 2, 2\).+loader_shape=\(2, 4\).+expected n == 2"):
+        collect_gemm_npu._mx_scale_to_loader_layout(_ByteArrayAdapter(range(12), (3, 2, 2)), (2, 4))
+
+
+@pytest.mark.parametrize(
+    ("shape", "loader_shape"),
+    [
+        ((2, 1, 2), (2, 3)),  # narrow: flat width 2 < expected 4
+        ((2, 3, 2), (2, 3)),  # over-wide: flat width 6 > expected 4
+    ],
+)
+def test_mx_scale_to_loader_layout_rejects_noncontract_flat_width(collect_gemm_npu, shape, loader_shape):
+    collect_gemm_npu.torch.uint8 = object()
+    size = 1
+    for dim in shape:
+        size *= dim
+    with pytest.raises(RuntimeError, match=r"invalid mx_scale flat width .+ shape=.+ loader_shape=.+ expected"):
+        collect_gemm_npu._mx_scale_to_loader_layout(_ByteArrayAdapter(range(size), shape), loader_shape)
+
+
 def test_gemm_peak_footprint_bytes_adds_quantized_staging(collect_gemm_npu):
     bf16_fixed = collect_gemm_npu._gemm_peak_footprint_bytes("bfloat16", 16, 32, 64, copies=0)
     fp8_fixed = collect_gemm_npu._gemm_peak_footprint_bytes("fp8", 16, 32, 64, copies=0)
@@ -386,12 +527,22 @@ def test_run_gemm_fp8_builds_dynamic_fp8_config_quantizes_weights_and_logs_same_
     ]
 
 
-def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_schema(
+@pytest.mark.parametrize(
+    ("k", "loader_scale_shape"),
+    [
+        (64, (32, 2)),
+        (32, (32, 1)),
+    ],
+)
+def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_trims_scale_to_loader_layout(
     collect_gemm_npu,
     monkeypatch,
+    k,
+    loader_scale_shape,
 ):
-    """fp8_block (W8A8_MXFP8) builds AscendModelSlimConfig, quantizes BF16 weights via
-    npu_dynamic_mx_quant(group=32), and logs identical schema.
+    """fp8_block (W8A8_MXFP8) maps paired MX scales from npu_dynamic_mx_quant
+    into the vLLM loader layout (n, ceil(k/32)); this trims k=32's extra paired
+    value and preserves k>=64 width.
     """
     from contextlib import contextmanager
 
@@ -407,6 +558,9 @@ def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_
 
     q_weight = MagicMock(name="q_weight")
     mx_scale = MagicMock(name="mx_scale")
+    mx_scale.shape = (32, 1, 2)
+    mx_scale.view.return_value.shape = (32, 1, 2)
+    mx_scale.view.return_value.reshape.return_value.shape = (32, 2)
 
     def fake_mx_quant(tensor, dst_type=None):
         mx_quant_calls.append((tensor, dst_type))
@@ -426,11 +580,11 @@ def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_
         linear_calls.append(kwargs)
         layer = MagicMock(name="mxfp8_gemm_layer")
         layer.weight = MagicMock(name="weight")
-        layer.weight.shape = (32, 64)
+        layer.weight.shape = (32, k)
         layer.weight.dtype = collect_gemm_npu.torch.float8_e4m3fn
         layer.weight.device = "npu:0"
         layer.weight_scale = MagicMock(name="weight_scale")
-        layer.weight_scale.shape = (32, 2)
+        layer.weight_scale.shape = loader_scale_shape
         layer.quant_method.process_weights_after_loading.side_effect = processed_layers.append
         return layer
 
@@ -447,14 +601,14 @@ def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_
     monkeypatch.setattr(collect_gemm_npu, "benchmark_with_power", fake_benchmark)
     monkeypatch.setattr(collect_gemm_npu, "log_perf", lambda **kwargs: logged.update(kwargs))
 
-    collect_gemm_npu.run_gemm("fp8_block", 16, 32, 64, perf_filename=PerfFile.GEMM)
+    collect_gemm_npu.run_gemm("fp8_block", 16, 32, k, perf_filename=PerfFile.GEMM)
 
     assert modelslim_config_calls == [{".weight": "W8A8_MXFP8", "group_size": 32}]
     assert len(init_ascend_config_calls) == 1
     assert init_ascend_config_calls[0].quant_config == ("ascend_modelslim_config", modelslim_config_calls[0])
     assert len(linear_calls) == 64
     assert all(
-        call["input_size"] == 64
+        call["input_size"] == k
         and call["output_size"] == 32
         and call["quant_config"] == ("ascend_modelslim_config", modelslim_config_calls[0])
         and call["prefix"] == ""
@@ -470,11 +624,16 @@ def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_
     for layer in processed_layers:
         layer.weight.fill_.assert_not_called()
         layer.weight.copy_.assert_called_once_with(q_weight)
-        layer.weight_scale.copy_.assert_called_once_with(mx_scale.reshape.return_value.view.return_value)
-    mx_scale.reshape.assert_called_with((32, 2))
-    mx_scale.reshape.return_value.view.assert_called_with(collect_gemm_npu.torch.uint8)
+        layer.weight_scale.copy_.assert_called_once_with(
+            mx_scale.view.return_value.reshape.return_value.__getitem__.return_value.reshape.return_value
+        )
+    mx_scale.view.assert_called_with(collect_gemm_npu.torch.uint8)
+    mx_scale.view.return_value.reshape.assert_called_with(32, -1)
+    mx_scale.view.return_value.reshape.return_value.__getitem__.return_value.reshape.assert_called_with(
+        loader_scale_shape
+    )
     collect_gemm_npu.torch.full.assert_called_with(
-        (32, 64),
+        (32, k),
         0.01,
         dtype=collect_gemm_npu.torch.bfloat16,
         device="npu:0",
@@ -491,7 +650,7 @@ def test_run_gemm_fp8_block_builds_mxfp8_config_quantizes_weights_and_logs_same_
             "gemm_dtype": "fp8_block",
             "m": 16,
             "n": 32,
-            "k": 64,
+            "k": k,
             "latency": pytest.approx(2.0),
             "used_cuda_graph": False,
         }
