@@ -20,7 +20,7 @@ gpu:
   fp32_flops: 34000000000000 # TODO: on-device campaign — no official or third-party FP32 number, conservative bf16/16 placeholder
   bfloat16_tc_flops: 430000000000000 # measured calibration (bf16 8192×8192 matmul, single card); keep as-is for this commit
   int8_tc_flops: 1034000000000000 # TODO: on-device campaign — 1034TOPS is a third-party 36-core figure, shares the FP8 tensor path
-  fp8_tc_flops: 1000000000000000 # retained for this commit; FP8 nominal-bin correction is tracked separately
+  fp8_tc_flops: 865000000000000 # white paper table 3-1, 950DT 32-core bin (Ascend950DT_9582) cube-only FP8/MXFP8 nominal peak = 865 TFLOPS
   fp4_tc_flops: 1730000000000000 # white paper table 3-1, 950DT 32-core bin (Ascend950DT_9582) cube-only MXFP4 nominal peak = 1730 TFLOPS
   power: 650 # 650W placeholder; measured range 390W idle - 680W under full load (8-card profiling, 2026-11-03); driver 25.6.rc2 exposes no Power Limit
 

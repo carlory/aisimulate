@@ -46,7 +46,9 @@ class TestAscend950dtSystemSpec:
         # Observed on the device node: 98304 MB HBM per chip (the 96GB tier).
         assert gpu["mem_capacity"] == 96 * 1024**3
         assert gpu["mem_bw"] == 4e12  # official 4TB/s
-        assert gpu["fp8_tc_flops"] == 1e15  # official 1 PFLOPS FP8/MXFP8/HiF8
+        # White paper table 3-1 lists 950DT bins as 36/32/28 cores. This host is
+        # Ascend950DT_9582 (32-core bin), so the cube-only FP8/MXFP8 nominal peak is 865 TFLOPS.
+        assert gpu["fp8_tc_flops"] == 865e12
         # 430 TFLOPS measured (bf16 8192x8192 matmul, single card, 2026-11-06);
         # white paper 28-core bin (425 TFLOPS theoretical), not the flagship 36-core (547).
         assert gpu["bfloat16_tc_flops"] == 430e12

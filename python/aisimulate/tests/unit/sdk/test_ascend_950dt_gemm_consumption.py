@@ -185,6 +185,25 @@ class TestMixedQuantMxfp4ConsumerContract:
         with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
             mxfp4_op._engine_query(db_no_fp4, x=16)
 
+        # Off-grid fp8 query uses fp8_tc_flops in the SOL/util hold path. A lower
+        # fp8_tc_flops (865e12) must not yield NaN/errors and must not make the
+        # extrapolated latency faster than a higher-flope sibling spec.
+        fp8_op = GEMM("gemm_fp8_offgrid", 1.0, 4096, 4096, common.GEMMQuantMode.fp8)
+        lat_865 = float(fp8_op._engine_query(db, x=65536))
+        assert lat_865 > 0.0 and lat_865 == pytest.approx(lat_865)
+
+        systems_root_fp8_high = tmp_path / "systems_fp8_high"
+        shutil.copytree(systems_root, systems_root_fp8_high)
+        spec_path_high = systems_root_fp8_high / f"{SYSTEM}.yaml"
+        spec_high = yaml.safe_load(spec_path_high.read_text())
+        spec_high["gpu"]["fp8_tc_flops"] = 1_000_000_000_000_000
+        spec_path_high.write_text(yaml.safe_dump(spec_high, sort_keys=False))
+        GEMM.clear_cache()
+        db_fp8_high = PerfDatabase(SYSTEM, BACKEND, VERSION, systems_root=str(systems_root_fp8_high))
+        lat_1000 = float(fp8_op._engine_query(db_fp8_high, x=65536))
+        assert lat_1000 > 0.0 and lat_1000 == pytest.approx(lat_1000)
+        assert lat_865 >= lat_1000
+
 
 class TestBackendResolution:
     def test_ascend_resolves_to_the_generic_vllm_backend(self, database) -> None:
